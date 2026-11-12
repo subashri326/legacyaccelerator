@@ -54,11 +54,32 @@ def _attr(elem: etree._Element, local_name: str, default: str = "") -> str:
 
 def _prop_dict(elem: etree._Element) -> dict[str, str]:
     props: dict[str, str] = {}
-    for prop in elem.xpath(".//properties/property"):
+    # Direct properties only: nested outputs/columns carry their own properties.
+    for prop in elem.xpath("./properties/property"):
         name = prop.attrib.get("name") or prop.attrib.get("Name") or ""
         if name:
             props[name] = (prop.text or "").strip()
     return props
+
+
+def _simple_select_table(sql: str | None) -> str | None:
+    """Return the table name if `sql` is a plain `SELECT ... FROM one_table` with no filters/joins."""
+    if not sql:
+        return None
+    import sqlglot
+    from sqlglot import exp
+
+    try:
+        parsed = sqlglot.parse_one(sql, read="tsql")
+    except Exception:
+        return None
+    if not isinstance(parsed, exp.Select) or parsed.args.get("joins") or parsed.args.get("where"):
+        return None
+    tables = list(parsed.find_all(exp.Table))
+    if len(tables) != 1:
+        return None
+    t = tables[0]
+    return f"{t.db}.{t.name}" if t.db else t.name
 
 
 def _classify_ssis_component(class_id: str, props: dict[str, str]) -> NodeOperator:
@@ -301,6 +322,14 @@ class SsisParser(Parser):
             routes: list[dict[str, str]] = []
             out_cols: list[ColumnIR] = []
             opaque_item: OpaqueSnippetIR | None = None
+            meta: dict[str, object] = {"properties": props}
+            join_keys: list[dict[str, str]] = []
+
+            if operator == NodeOperator.LOOKUP and not table_ref:
+                # Lookups usually define the reference set with a query; accept a plain SELECT.
+                table_ref = _simple_select_table(sql_cmd)
+                if table_ref is None and sql_cmd:
+                    meta["reference_query"] = sql_cmd
 
             for out_el in comp.xpath("./outputs/output"):
                 out_ref = out_el.attrib.get("refId") or out_el.attrib.get("id") or ""
@@ -311,9 +340,12 @@ class SsisParser(Parser):
                     output_branch_name[out_ref] = out_name
 
                 out_props = _prop_dict(out_el)
+                if operator == NodeOperator.LOOKUP and "no match" in out_name.lower():
+                    meta["no_match_output"] = out_name
                 if (
                     operator == NodeOperator.ROUTER
                     and not is_err
+                    and out_el.attrib.get("isDefaultOut", "false").lower() != "true"
                     and (out_props.get("FriendlyExpression") or out_props.get("Expression"))
                 ):
                     raw_cond = out_props.get("FriendlyExpression") or out_props.get(
@@ -329,6 +361,12 @@ class SsisParser(Parser):
                     if col_name and not is_err:
                         out_cols.append(ColumnIR(name=col_name, data_type=col_dtype))
                     c_props = _prop_dict(col_el)
+                    copy_from = c_props.get("CopyFromReferenceColumn")
+                    if operator == NodeOperator.LOOKUP and copy_from and not is_err:
+                        meta.setdefault("copy_columns", []).append(  # type: ignore[union-attr]
+                            {"reference": copy_from, "alias": col_name}
+                        )
+                        continue
                     raw_expr = c_props.get("FriendlyExpression") or c_props.get("Expression")
                     if raw_expr:
                         expr_ir = ExpressionConverter.to_neutral(
@@ -340,6 +378,25 @@ class SsisParser(Parser):
                 in_ref = in_el.attrib.get("refId") or in_el.attrib.get("id") or ""
                 if in_ref:
                     input_to_node[in_ref] = c_id
+                if in_el.attrib.get("errorRowDisposition"):
+                    meta["error_row_disposition"] = in_el.attrib["errorRowDisposition"]
+                ext_names = {
+                    (x.attrib.get("refId") or x.attrib.get("id") or ""): x.attrib.get("name", "")
+                    for x in in_el.xpath("./externalMetadataColumns/externalMetadataColumn")
+                }
+                mapping: list[dict[str, str]] = []
+                for ic in in_el.xpath("./inputColumns/inputColumn"):
+                    cached = ic.attrib.get("cachedName") or ic.attrib.get("name") or ""
+                    ic_props = _prop_dict(ic)
+                    if ic_props.get("JoinToReferenceColumn"):
+                        join_keys.append(
+                            {"left": cached, "right": ic_props["JoinToReferenceColumn"]}
+                        )
+                    ext_id = ic.attrib.get("externalMetadataColumnId")
+                    if operator == NodeOperator.TARGET and ext_id and ext_names.get(ext_id):
+                        mapping.append({"source": cached, "target": ext_names[ext_id]})
+                if mapping:
+                    meta["column_mapping"] = mapping
 
             if operator == NodeOperator.OPAQUE:
                 opaque_item = OpaqueSnippetIR(
@@ -365,7 +422,9 @@ class SsisParser(Parser):
                     routes=routes,
                     output_columns=out_cols,
                     opaque=opaque_item,
-                    metadata={"properties": props},
+                    join_type="INNER" if operator == NodeOperator.LOOKUP else None,
+                    join_keys=join_keys,
+                    metadata=meta,
                 )
             )
 

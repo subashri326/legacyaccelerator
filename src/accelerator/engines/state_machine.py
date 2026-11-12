@@ -161,6 +161,46 @@ class StateMachine:
         return row
 
     @staticmethod
+    def record_source(
+        db: Session,
+        project_id: str,
+        object_key: str,
+        object_kind: str,
+        source_hash: str,
+        actor: str = "system",
+    ) -> ObjectStatus:
+        """Remember which source version an object was built from.
+
+        If the source changed after the object moved on, its earlier conversion/validation no
+        longer holds: send it back to Discovered (with an auditable event) so it is redone.
+        """
+        row = StateMachine.ensure_object(db, project_id, object_key, object_kind, actor=actor)
+        if (
+            row.source_hash
+            and row.source_hash != source_hash
+            and row.state != ObjectState.DISCOVERED.value
+        ):
+            db.add(
+                StatusEvent(
+                    project_id=project_id,
+                    object_key=object_key,
+                    from_state=row.state,
+                    to_state=ObjectState.DISCOVERED.value,
+                    actor=actor,
+                    evidence_type="source_changed",
+                    evidence_id=source_hash[:16],
+                    details={"previous_hash": row.source_hash, "new_hash": source_hash},
+                    created_by=actor,
+                )
+            )
+            row.state = ObjectState.DISCOVERED.value
+            row.blocker_reason = None
+            row.last_evidence_ref = f"source_changed:{source_hash[:16]}"
+        row.source_hash = source_hash
+        db.flush()
+        return row
+
+    @staticmethod
     def set_blocker(
         db: Session,
         project_id: str,

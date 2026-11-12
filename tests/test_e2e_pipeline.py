@@ -83,29 +83,45 @@ def test_full_six_stage_e2e_and_signoff(isolated_env: Path) -> None:
                 db, project_id, "Load_Customers_And_Orders", actor="eng", actor_role="engineer"
             )
 
-        # AI assist proposes fix -> Human accepts -> Now deploy succeeds!
-        res_item = (
+        # Every flagged item must be reviewed before deploy: the Script Task gets an AI-proposed
+        # fix that a reviewer approves; the TRUNCATE of an uncatalogued staging table is approved
+        # as "not needed" (no replacement code).
+        items = (
             db.query(ResidueItem)
             .filter(
                 ResidueItem.project_id == project_id,
                 ResidueItem.object_key == "Load_Customers_And_Orders",
             )
-            .first()
+            .all()
         )
-        assert res_item is not None
-        ConvertEngine().propose_ai_fix(
-            db, project_id, res_item.id, actor="eng", actor_role="engineer"
-        )
-        ConvertEngine().decide_residue(
-            db,
-            project_id,
-            res_item.id,
-            "approved",
-            None,
-            "Looks good",
-            actor="reviewer",
-            actor_role="reviewer",
-        )
+        codes = sorted(i.reason_code for i in items)
+        assert codes == ["SSIS_SCRIPT_TASK", "UNKNOWN_TABLE_REFERENCE"]
+        for item in items:
+            if item.reason_code == "SSIS_SCRIPT_TASK":
+                ConvertEngine().propose_ai_fix(
+                    db, project_id, item.id, actor="eng", actor_role="engineer"
+                )
+                ConvertEngine().decide_residue(
+                    db,
+                    project_id,
+                    item.id,
+                    "approved",
+                    None,
+                    "Looks good",
+                    actor="reviewer",
+                    actor_role="reviewer",
+                )
+            else:
+                ConvertEngine().decide_residue(
+                    db,
+                    project_id,
+                    item.id,
+                    "approved",
+                    "",
+                    "Staging truncate not needed",
+                    actor="reviewer",
+                    actor_role="reviewer",
+                )
         st = ConvertEngine().approve_and_deploy_object(
             db, project_id, "Load_Customers_And_Orders", actor="eng", actor_role="engineer"
         )
@@ -168,7 +184,9 @@ def test_full_six_stage_e2e_and_signoff(isolated_env: Path) -> None:
 
     # 7. Inject a mismatch in target DB and verify L4 diff masks PII columns (ssn, email)!
     t_conn = duckdb.connect(str(tgt_db))
-    t_conn.execute("UPDATE dbo.customers SET email = 'tampered@evil.test' WHERE customer_id = 1;")
+    t_conn.execute(
+        "UPDATE CURATED_LEGACY_DDL.CUSTOMERS SET email = 'tampered@evil.test' WHERE customer_id = 1;"
+    )
     t_conn.close()
 
     with session_scope() as db:
