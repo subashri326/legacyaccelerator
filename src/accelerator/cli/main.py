@@ -110,11 +110,22 @@ def move(
     project_id: str,
     mode: str = typer.Option("bulk", help="bulk | incremental"),
     wave_id: str | None = typer.Option(None),
+    object_key: str | None = typer.Option(None, help="Load one table only"),
+    resume_load_run_id: str | None = typer.Option(
+        None, help="Continue a failed load run after its last saved chunk"
+    ),
 ) -> None:
-    """Stage 4: Execute partitioned Parquet bulk or incremental watermark load."""
+    """Stage 4: Move data chunk by chunk (bulk or incremental upsert), resumable."""
     with session_scope() as db:
         res = MoveEngine().run(
-            db, project_id, wave_id=wave_id, mode=mode, actor="cli", actor_role="engineer"
+            db,
+            project_id,
+            wave_id=wave_id,
+            object_key=object_key,
+            mode=mode,
+            resume_load_run_id=resume_load_run_id,
+            actor="cli",
+            actor_role="engineer",
         )
     console.print(res)
 

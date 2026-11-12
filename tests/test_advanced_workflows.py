@@ -14,6 +14,7 @@ from accelerator.db.models import LoadRun
 from accelerator.db.repository import ensure_project_from_config
 from accelerator.db.session import session_scope
 from accelerator.engines.assess import AssessEngine
+from accelerator.engines.convert import ConvertEngine
 from accelerator.engines.discover import DiscoverEngine
 from accelerator.engines.move import MoveEngine
 from accelerator.ir.models import PackageIR
@@ -90,6 +91,7 @@ movement:
         proj, _, _ = ensure_project_from_config(db, yaml_cfg)
         DiscoverEngine().run(db, proj.id)
         AssessEngine().run(db, proj.id)
+        ConvertEngine().run(db, proj.id)  # Move builds the target from the converted DDL
         m1 = MoveEngine().run(db, proj.id, mode="bulk")
         assert m1.total_rows_loaded == 2
 

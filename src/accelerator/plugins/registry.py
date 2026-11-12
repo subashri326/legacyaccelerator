@@ -109,7 +109,7 @@ def get_plugin_registry() -> PluginRegistry:
 
 def build_default_registry() -> PluginRegistry:
     from accelerator.plugins.collectors.oracle import OracleCollector
-    from accelerator.plugins.collectors.sqlserver import SqlServerCollector
+    from accelerator.plugins.collectors.sqlserver import PostgresCollector, SqlServerCollector
     from accelerator.plugins.collectors.teradata import TeradataCollector
     from accelerator.plugins.generators.databricks import DatabricksGenerator
     from accelerator.plugins.generators.fabric import FabricGenerator
@@ -125,6 +125,7 @@ def build_default_registry() -> PluginRegistry:
     from accelerator.plugins.parsers.informatica import InformaticaParser
     from accelerator.plugins.parsers.sql_dialect import (
         BteqParser,
+        PgSqlParser,
         PlSqlParser,
         TSqlParser,
     )
@@ -137,11 +138,13 @@ def build_default_registry() -> PluginRegistry:
     reg.register(SqlServerCollector(), aliases=["sqlserver", "duckdb", "sqlite"])
     reg.register(OracleCollector(), aliases=["oracle"])
     reg.register(TeradataCollector(), aliases=["teradata"])
+    reg.register(PostgresCollector(), aliases=["postgres", "postgresql"])
 
     # Parsers
     reg.register(TSqlParser(), aliases=["tsql", "sqlserver", "sql"])
     reg.register(PlSqlParser(), aliases=["plsql", "oracle"])
     reg.register(BteqParser(), aliases=["bteq", "teradata"])
+    reg.register(PgSqlParser(), aliases=["postgres", "postgresql"])
     reg.register(SsisParser(), aliases=["ssis", "dtsx"])
     reg.register(InformaticaParser(), aliases=["informatica", "powercenter"])
     reg.register(DataStageParser(), aliases=["datastage", "dsx", "isx"])

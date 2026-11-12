@@ -17,7 +17,7 @@ TargetPlatform = Literal["snowflake", "databricks", "fabric"]
 
 
 class SourceConfig(BaseModel):
-    database: Literal["sqlserver", "oracle", "teradata", "duckdb", "sqlite"]
+    database: Literal["sqlserver", "oracle", "teradata", "postgres", "duckdb", "sqlite"]
     # `etl` accepts one tool or a list; `etl_tools` always holds the full list and `etl` the primary one.
     etl: EtlTool = "none"
     etl_tools: list[EtlTool] = Field(default_factory=list)

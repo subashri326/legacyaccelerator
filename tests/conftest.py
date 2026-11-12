@@ -27,3 +27,26 @@ def isolated_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     init_db(f"sqlite:///{db_path.as_posix()}")
     yield tmp_path
     get_settings.cache_clear()
+
+
+@pytest.fixture()
+def pg_database():  # type: ignore[no-untyped-def]
+    """A fresh, empty PostgreSQL database (needs L2C_TEST_POSTGRES_URL); dropped afterwards."""
+    import os
+    import uuid
+
+    from sqlalchemy import create_engine, text
+    from sqlalchemy.engine import make_url
+
+    base = os.getenv("L2C_TEST_POSTGRES_URL")
+    if not base:
+        pytest.skip("set L2C_TEST_POSTGRES_URL to run PostgreSQL tests")
+    name = f"l2c_{uuid.uuid4().hex[:10]}"
+    admin = create_engine(base, isolation_level="AUTOCOMMIT")
+    with admin.connect() as c:
+        c.execute(text(f"CREATE DATABASE {name}"))
+    url = make_url(base).set(database=name).render_as_string(hide_password=False)
+    yield url
+    with admin.connect() as c:
+        c.execute(text(f"DROP DATABASE IF EXISTS {name} WITH (FORCE)"))
+    admin.dispose()

@@ -171,12 +171,16 @@ class Mover(BasePlugin):
         config: ClientConfig,
         mode: str = "bulk",
         watermark_value: str | None = None,
-        existing_completed_partitions: set[int] | None = None,
+        resume: bool = False,
+        start_partition_index: int = 0,
         staging_writer: Callable[[int, bytes], str] | None = None,
         target_ddl_sql: str | None = None,
         target_table: TableIR | None = None,
+        on_partition: Callable[[PartitionResult], None] | None = None,
     ) -> MoveOutcome:
-        """Execute partitioned bulk or watermark incremental load with checkpoints."""
+        """Load one table bulk or incrementally, reporting each finished chunk to `on_partition`
+        (the engine checkpoints it immediately). With `resume`, continue after what is already
+        on the target instead of starting over."""
 
 
 class Validator(BasePlugin):
