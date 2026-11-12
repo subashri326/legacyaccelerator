@@ -111,7 +111,9 @@ class SourceCollector(BasePlugin):
     ) -> CatalogIR:
         """Collect tables, columns, keys, views, procedures, row counts and sizes."""
 
-    def collect_usage(self, connection_uri: str, usage_log_path: str | None = None) -> dict[str, int]:
+    def collect_usage(
+        self, connection_uri: str, usage_log_path: str | None = None
+    ) -> dict[str, int]:
         """Optional: collect 30-day read counts keyed by lowercase FQN."""
         return {}
 

@@ -156,7 +156,13 @@ def parse_ddl_to_catalog(
                 definition_sql=body,
                 referenced_tables=refs,
                 target_tables=targets,
-                has_dynamic_sql=bool(re.search(r"\bEXEC(?:UTE)?\s*\(|sp_executesql|EXECUTE\s+IMMEDIATE", body, re.IGNORECASE)),
+                has_dynamic_sql=bool(
+                    re.search(
+                        r"\bEXEC(?:UTE)?\s*\(|sp_executesql|EXECUTE\s+IMMEDIATE",
+                        body,
+                        re.IGNORECASE,
+                    )
+                ),
                 has_cursors=bool(re.search(r"\bCURSOR\b", body, re.IGNORECASE)),
             )
         )
@@ -225,7 +231,9 @@ def harvest_duckdb_catalog(
                     )
                 )
             else:
-                cnt_rows = conn.execute(f'SELECT COUNT(*) FROM "{schema_name}"."{table_name}"').fetchall()
+                cnt_rows = conn.execute(
+                    f'SELECT COUNT(*) FROM "{schema_name}"."{table_name}"'
+                ).fetchall()
                 row_count = int(cnt_rows[0][0]) if cnt_rows else 0
                 tables.append(
                     TableIR(
@@ -367,5 +375,7 @@ class BaseSqlCollector(SourceCollector):
     ) -> CatalogIR:
         raise NotImplementedError("Override in specific enterprise DB collector")
 
-    def collect_usage(self, connection_uri: str, usage_log_path: str | None = None) -> dict[str, int]:
+    def collect_usage(
+        self, connection_uri: str, usage_log_path: str | None = None
+    ) -> dict[str, int]:
         return load_usage_csv_or_json(usage_log_path)

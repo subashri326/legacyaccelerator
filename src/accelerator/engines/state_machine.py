@@ -128,7 +128,13 @@ class StateMachine:
         table_bulk_shortcut = (
             object_kind == "table"
             and to_state == ObjectState.LOADED
-            and current in (ObjectState.ASSESSED, ObjectState.CONVERTED, ObjectState.REVIEWED, ObjectState.DEPLOYED)
+            and current
+            in (
+                ObjectState.ASSESSED,
+                ObjectState.CONVERTED,
+                ObjectState.REVIEWED,
+                ObjectState.DEPLOYED,
+            )
         )
         if to_state not in allowed and not table_bulk_shortcut:
             raise StateTransitionError(

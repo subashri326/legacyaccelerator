@@ -49,7 +49,18 @@ class OracleCollector(BaseSqlCollector):
             rows = cur.execute(ORACLE_CATALOG_SQL).fetchall()
             grouped: dict[tuple[str, str], TableIR] = {}
             allowed = {s.lower() for s in schemas} if schemas else None
-            for schema_name, table_name, col_name, dtype, length, prec, scale, nullable, ord_pos, num_rows in rows:
+            for (
+                schema_name,
+                table_name,
+                col_name,
+                dtype,
+                length,
+                prec,
+                scale,
+                nullable,
+                ord_pos,
+                num_rows,
+            ) in rows:
                 if allowed and str(schema_name).lower() not in allowed:
                     continue
                 key = (str(schema_name), str(table_name))
@@ -80,7 +91,9 @@ class OracleCollector(BaseSqlCollector):
             conn.close()
 
     def run_golden_check(self) -> tuple[bool, str]:
-        sample = "CREATE TABLE FINANCE.LEDGER (LEDGER_ID NUMBER(10) PRIMARY KEY, AMOUNT NUMBER(18,2));"
+        sample = (
+            "CREATE TABLE FINANCE.LEDGER (LEDGER_ID NUMBER(10) PRIMARY KEY, AMOUNT NUMBER(18,2));"
+        )
         cat = parse_ddl_to_catalog(sample, "oracle", "oracle", "ORCL")
         ok = len(cat.tables) == 1 and cat.tables[0].name == "LEDGER"
         return ok, "OracleCollector golden DDL check passed" if ok else "Failed golden check"

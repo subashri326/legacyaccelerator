@@ -97,7 +97,9 @@ class ConvertEngine:
             if object_key:
                 allowed_keys = {object_key}
             elif wave_id:
-                wave = db.query(Wave).filter(Wave.id == wave_id, Wave.project_id == project_id).first()
+                wave = (
+                    db.query(Wave).filter(Wave.id == wave_id, Wave.project_id == project_id).first()
+                )
                 if wave is None:
                     raise ValueError(f"Wave '{wave_id}' not found")
                 wave_name = f"wave-{wave.wave_number}"
@@ -153,11 +155,20 @@ class ConvertEngine:
                     continue
                 ddl_file = generator.generate_ddl(tbl_ir, cfg)
                 generated_files.append(ddl_file)
-                self._upsert_generated_artifact(db, run_row.id, project_id, cfg.target.platform, ddl_file, actor)
+                self._upsert_generated_artifact(
+                    db, run_row.id, project_id, cfg.target.platform, ddl_file, actor
+                )
                 if ddl_file.compile_passed:
                     compile_ok += 1
                     StateMachine.advance(
-                        db, project_id, fqn, "table", ObjectState.CONVERTED, actor, "conversion_run", run_row.id
+                        db,
+                        project_id,
+                        fqn,
+                        "table",
+                        ObjectState.CONVERTED,
+                        actor,
+                        "conversion_run",
+                        run_row.id,
                     )
                 else:
                     compile_fail += 1
@@ -176,9 +187,13 @@ class ConvertEngine:
             accepted_map: dict[str, dict[str, str]] = {}
             for dec in accepted_decisions:
                 if dec.residue_item_id:
-                    r_item = db.query(ResidueItem).filter(ResidueItem.id == dec.residue_item_id).first()
+                    r_item = (
+                        db.query(ResidueItem).filter(ResidueItem.id == dec.residue_item_id).first()
+                    )
                     if r_item and dec.replacement_code:
-                        accepted_map.setdefault(dec.object_key, {})[r_item.component_name] = dec.replacement_code
+                        accepted_map.setdefault(dec.object_key, {})[r_item.component_name] = (
+                            dec.replacement_code
+                        )
 
             # Generate code from persisted Neutral IR flows (never raw files!)
             flows = db.query(IrFlow).filter(IrFlow.project_id == project_id).all()
@@ -193,7 +208,9 @@ class ConvertEngine:
                 obj_compile_ok = True
                 for gf in bundle.files:
                     generated_files.append(gf)
-                    self._upsert_generated_artifact(db, run_row.id, project_id, cfg.target.platform, gf, actor)
+                    self._upsert_generated_artifact(
+                        db, run_row.id, project_id, cfg.target.platform, gf, actor
+                    )
                     if gf.compile_passed:
                         compile_ok += 1
                     else:
@@ -240,7 +257,9 @@ class ConvertEngine:
 
             git_result: GitDeliveryResult | None = None
             if deliver_git and generated_files:
-                repo_dir = Path(git_repo_path or cfg.git.repo_path or f".l2c_data/git_repos/{project_id}")
+                repo_dir = Path(
+                    git_repo_path or cfg.git.repo_path or f".l2c_data/git_repos/{project_id}"
+                )
                 git_svc = GitDeliveryService(repo_dir, base_branch=cfg.git.base_branch)
                 files_dict = {gf.relative_path: gf.content for gf in generated_files}
                 git_result = git_svc.deliver_wave(
@@ -433,16 +452,33 @@ class ConvertEngine:
         if remaining == 0 and decision == "approved":
             obj_status = (
                 db.query(ObjectStatus)
-                .filter(ObjectStatus.project_id == project_id, ObjectStatus.object_key == item.object_key)
+                .filter(
+                    ObjectStatus.project_id == project_id,
+                    ObjectStatus.object_key == item.object_key,
+                )
                 .first()
             )
             kind = obj_status.object_kind if obj_status else "etl_job"
             if obj_status and obj_status.state == ObjectState.ASSESSED.value:
                 StateMachine.advance(
-                    db, project_id, item.object_key, kind, ObjectState.CONVERTED, actor, "review_decision", dec.id
+                    db,
+                    project_id,
+                    item.object_key,
+                    kind,
+                    ObjectState.CONVERTED,
+                    actor,
+                    "review_decision",
+                    dec.id,
                 )
             StateMachine.advance(
-                db, project_id, item.object_key, kind, ObjectState.REVIEWED, actor, "review_decision", dec.id
+                db,
+                project_id,
+                item.object_key,
+                kind,
+                ObjectState.REVIEWED,
+                actor,
+                "review_decision",
+                dec.id,
             )
 
         record_audit(
@@ -501,10 +537,24 @@ class ConvertEngine:
 
         if obj_status.state == ObjectState.CONVERTED.value:
             StateMachine.advance(
-                db, project_id, object_key, obj_status.object_kind, ObjectState.REVIEWED, actor, "review_decision", dec.id
+                db,
+                project_id,
+                object_key,
+                obj_status.object_kind,
+                ObjectState.REVIEWED,
+                actor,
+                "review_decision",
+                dec.id,
             )
         updated = StateMachine.advance(
-            db, project_id, object_key, obj_status.object_kind, ObjectState.DEPLOYED, actor, "deployment", dec.id
+            db,
+            project_id,
+            object_key,
+            obj_status.object_kind,
+            ObjectState.DEPLOYED,
+            actor,
+            "deployment",
+            dec.id,
         )
         record_audit(
             db,

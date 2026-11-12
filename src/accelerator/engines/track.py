@@ -33,7 +33,9 @@ class TrackEngine:
 
     def get_dashboard(self, db: Session, project_id: str) -> dict[str, Any]:
         statuses = db.query(ObjectStatus).filter(ObjectStatus.project_id == project_id).all()
-        waves = db.query(Wave).filter(Wave.project_id == project_id).order_by(Wave.wave_number).all()
+        waves = (
+            db.query(Wave).filter(Wave.project_id == project_id).order_by(Wave.wave_number).all()
+        )
 
         state_counts = Counter(s.state for s in statuses)
         kind_counts = Counter(s.object_kind for s in statuses)
@@ -91,7 +93,9 @@ class TrackEngine:
         with metrics.stage_span("signoff", project_id):
             obj_status = (
                 db.query(ObjectStatus)
-                .filter(ObjectStatus.project_id == project_id, ObjectStatus.object_key == object_key)
+                .filter(
+                    ObjectStatus.project_id == project_id, ObjectStatus.object_key == object_key
+                )
                 .first()
             )
             if obj_status is None:
@@ -201,12 +205,16 @@ class TrackEngine:
         for state, cnt in dash["by_state"].items():
             md_lines.append(f"| {state} | {cnt} |")
 
-        md_lines.extend(["", "## Wave Progress", "| Wave | Total | States |", "| --- | --- | --- |"])
+        md_lines.extend(
+            ["", "## Wave Progress", "| Wave | Total | States |", "| --- | --- | --- |"]
+        )
         for w in dash["waves"]:
             md_lines.append(f"| {w['name']} | {w['total_objects']} | {w['states']} |")
 
         if dash["blockers"]:
-            md_lines.extend(["", "## Active Blockers", "| Object | State | Reason |", "| --- | --- | --- |"])
+            md_lines.extend(
+                ["", "## Active Blockers", "| Object | State | Reason |", "| --- | --- | --- |"]
+            )
             for b in dash["blockers"]:
                 md_lines.append(f"| {b['object_key']} | {b['state']} | {b['blocker_reason']} |")
 
@@ -225,7 +233,9 @@ class TrackEngine:
         ws_b = wb.create_sheet("Blockers")
         ws_b.append(["Object Key", "Kind", "State", "Owner", "Blocker Reason"])
         for b in dash["blockers"]:
-            ws_b.append([b["object_key"], b["object_kind"], b["state"], b["owner"], b["blocker_reason"]])
+            ws_b.append(
+                [b["object_key"], b["object_kind"], b["state"], b["owner"], b["blocker_reason"]]
+            )
 
         buf = io.BytesIO()
         wb.save(buf)

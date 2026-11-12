@@ -119,7 +119,11 @@ class MoveEngine:
                 elif mode == "incremental":
                     last_run = (
                         db.query(LoadRun)
-                        .filter(LoadRun.project_id == project_id, LoadRun.object_key == obj.fqn, LoadRun.status == "completed")
+                        .filter(
+                            LoadRun.project_id == project_id,
+                            LoadRun.object_key == obj.fqn,
+                            LoadRun.status == "completed",
+                        )
                         .order_by(LoadRun.created_at.desc())
                         .first()
                     )
@@ -150,7 +154,9 @@ class MoveEngine:
                 db.add(load_run)
                 db.flush()
 
-                def _stage_partition(p_idx: int, pq_bytes: bytes, _fqn: str = obj.fqn, _rid: str = load_run.id) -> str:
+                def _stage_partition(
+                    p_idx: int, pq_bytes: bytes, _fqn: str = obj.fqn, _rid: str = load_run.id
+                ) -> str:
                     safe = _fqn.replace(".", "_")
                     key = f"projects/{project_id}/{cfg.movement.staging_prefix}/{safe}/{_rid}/part_{p_idx:04d}.parquet"
                     return self.store.put_bytes(key, pq_bytes)
@@ -208,7 +214,14 @@ class MoveEngine:
                 run_ids.append(load_run.id)
 
                 StateMachine.advance(
-                    db, project_id, obj.fqn, "table", ObjectState.LOADED, actor, "load_run", load_run.id
+                    db,
+                    project_id,
+                    obj.fqn,
+                    "table",
+                    ObjectState.LOADED,
+                    actor,
+                    "load_run",
+                    load_run.id,
                 )
 
             record_audit(

@@ -85,7 +85,10 @@ class DiscoverEngine:
 
             # Upsert tables
             for tbl in catalog.tables:
-                reads = usage_map.get(tbl.fqn.lower(), usage_map.get(f"{tbl.schema_name}.{tbl.name}".lower(), tbl.usage_reads_30d))
+                reads = usage_map.get(
+                    tbl.fqn.lower(),
+                    usage_map.get(f"{tbl.schema_name}.{tbl.name}".lower(), tbl.usage_reads_30d),
+                )
                 is_dead = bool(usage_map and reads == 0) or tbl.is_dead_candidate
                 if is_dead:
                     dead_candidates += 1
@@ -130,7 +133,11 @@ class DiscoverEngine:
 
             # Upsert views
             for vw in catalog.views:
-                fqn = f"{vw.database}.{vw.schema_name}.{vw.name}" if vw.database else f"{vw.schema_name}.{vw.name}"
+                fqn = (
+                    f"{vw.database}.{vw.schema_name}.{vw.name}"
+                    if vw.database
+                    else f"{vw.schema_name}.{vw.name}"
+                )
                 vw_hash = hashlib.sha256(vw.definition_sql.encode("utf-8")).hexdigest()
                 self._upsert_db_object(
                     db=db,
@@ -153,7 +160,11 @@ class DiscoverEngine:
 
             # Upsert stored procedures
             for proc in catalog.procedures:
-                fqn = f"{proc.database}.{proc.schema_name}.{proc.name}" if proc.database else f"{proc.schema_name}.{proc.name}"
+                fqn = (
+                    f"{proc.database}.{proc.schema_name}.{proc.name}"
+                    if proc.database
+                    else f"{proc.schema_name}.{proc.name}"
+                )
                 p_hash = hashlib.sha256(proc.definition_sql.encode("utf-8")).hexdigest()
                 self._upsert_db_object(
                     db=db,
@@ -273,7 +284,9 @@ class DiscoverEngine:
 
         prev_max = (
             db.query(SourceArtifact)
-            .filter(SourceArtifact.project_id == project_id, SourceArtifact.artifact_key == artifact_key)
+            .filter(
+                SourceArtifact.project_id == project_id, SourceArtifact.artifact_key == artifact_key
+            )
             .order_by(SourceArtifact.version_num.desc())
             .first()
         )

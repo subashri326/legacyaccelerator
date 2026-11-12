@@ -106,13 +106,32 @@ def normalize_etl_expression(expr_text: str, source_tool: str) -> str:
         # Strip @[User::Var] -> :var
         text = re.sub(r"@\[(?:User|System)::([A-Za-z0-9_]+)\]", r":\1", text)
         # Replace SSIS cast (DT_WSTR, 50)col or (DT_I4)col -> CAST(col AS ...)
-        text = re.sub(r"\(DT_WSTR\s*,\s*\d+\)\s*([A-Za-z0-9_\.\[\]]+)", r"CAST(\1 AS VARCHAR)", text, flags=re.IGNORECASE)
-        text = re.sub(r"\(DT_STR\s*,\s*\d+\s*,\s*\d+\)\s*([A-Za-z0-9_\.\[\]]+)", r"CAST(\1 AS VARCHAR)", text, flags=re.IGNORECASE)
-        text = re.sub(r"\(DT_I4\)\s*([A-Za-z0-9_\.\[\]]+)", r"CAST(\1 AS INTEGER)", text, flags=re.IGNORECASE)
-        text = re.sub(r"\(DT_NUMERIC\s*,\s*(\d+)\s*,\s*(\d+)\)\s*([A-Za-z0-9_\.\[\]]+)", r"CAST(\3 AS DECIMAL(\1,\2))", text, flags=re.IGNORECASE)
+        text = re.sub(
+            r"\(DT_WSTR\s*,\s*\d+\)\s*([A-Za-z0-9_\.\[\]]+)",
+            r"CAST(\1 AS VARCHAR)",
+            text,
+            flags=re.IGNORECASE,
+        )
+        text = re.sub(
+            r"\(DT_STR\s*,\s*\d+\s*,\s*\d+\)\s*([A-Za-z0-9_\.\[\]]+)",
+            r"CAST(\1 AS VARCHAR)",
+            text,
+            flags=re.IGNORECASE,
+        )
+        text = re.sub(
+            r"\(DT_I4\)\s*([A-Za-z0-9_\.\[\]]+)", r"CAST(\1 AS INTEGER)", text, flags=re.IGNORECASE
+        )
+        text = re.sub(
+            r"\(DT_NUMERIC\s*,\s*(\d+)\s*,\s*(\d+)\)\s*([A-Za-z0-9_\.\[\]]+)",
+            r"CAST(\3 AS DECIMAL(\1,\2))",
+            text,
+            flags=re.IGNORECASE,
+        )
         # ISNULL(x) in SSIS is unary boolean! Convert ISNULL(x) -> (x IS NULL)
         text = re.sub(r"\bISNULL\s*\(\s*([^,\)]+)\s*\)", r"(\1 IS NULL)", text, flags=re.IGNORECASE)
-        text = text.replace("==", "=").replace("!=", "<>").replace("&&", " AND ").replace("||", " OR ")
+        text = (
+            text.replace("==", "=").replace("!=", "<>").replace("&&", " AND ").replace("||", " OR ")
+        )
         text = re.sub(r"\bGETDATE\s*\(\s*\)", "CURRENT_TIMESTAMP", text, flags=re.IGNORECASE)
         text = re.sub(r"\bLEN\s*\(", "LENGTH(", text, flags=re.IGNORECASE)
         text = _replace_ternaries(text)
@@ -120,7 +139,9 @@ def normalize_etl_expression(expr_text: str, source_tool: str) -> str:
 
     if tool == "informatica":
         # IIF(cond, a, b) -> CASE WHEN cond THEN a ELSE b END
-        iif_match = re.match(r"^IIF\s*\(\s*(.+?)\s*,\s*(.+?)\s*,\s*(.+)\s*\)$", text, flags=re.IGNORECASE)
+        iif_match = re.match(
+            r"^IIF\s*\(\s*(.+?)\s*,\s*(.+?)\s*,\s*(.+)\s*\)$", text, flags=re.IGNORECASE
+        )
         if iif_match:
             cond, t_val, f_val = iif_match.groups()
             text = f"CASE WHEN {cond} THEN {t_val} ELSE {f_val} END"
@@ -188,7 +209,9 @@ class ExpressionConverter:
         return parsed.sql(dialect=target_dialect)
 
     @staticmethod
-    def transpile_sql(sql_text: str, source_dialect: str, target_platform: str) -> tuple[str, list[str]]:
+    def transpile_sql(
+        sql_text: str, source_dialect: str, target_platform: str
+    ) -> tuple[str, list[str]]:
         """Transpile full SQL statement(s), returning (transpiled_sql, warnings)."""
         src = DIALECT_MAP.get(source_dialect.lower(), "tsql")
         tgt = DIALECT_MAP.get(target_platform.lower(), "snowflake")

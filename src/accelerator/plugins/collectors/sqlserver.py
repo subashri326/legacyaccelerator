@@ -92,5 +92,9 @@ class SqlServerCollector(BaseSqlCollector):
     def run_golden_check(self) -> tuple[bool, str]:
         sample = "CREATE TABLE dbo.orders (order_id INT NOT NULL PRIMARY KEY, total DECIMAL(12,2));"
         cat = parse_ddl_to_catalog(sample, "sqlserver", "tsql", "acme")
-        ok = len(cat.tables) == 1 and cat.tables[0].name == "orders" and len(cat.tables[0].columns) == 2
+        ok = (
+            len(cat.tables) == 1
+            and cat.tables[0].name == "orders"
+            and len(cat.tables[0].columns) == 2
+        )
         return ok, "SqlServerCollector golden DDL check passed" if ok else "Failed golden check"

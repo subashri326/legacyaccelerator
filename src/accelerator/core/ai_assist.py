@@ -53,7 +53,9 @@ class ResidueAiAssistant:
                 )
             except (httpx.HTTPError, OSError, ValueError, KeyError) as exc:
                 # Fall through to deterministic pattern assistant when external LLM is unreachable
-                logger.warning("External AI endpoint unavailable, using deterministic fallback: %s", exc)
+                logger.warning(
+                    "External AI endpoint unavailable, using deterministic fallback: %s", exc
+                )
 
         return self._deterministic_fallback_proposal(
             snippet=original_snippet,

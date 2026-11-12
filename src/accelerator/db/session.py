@@ -118,7 +118,12 @@ def seed_roles_and_admin(db: Session) -> None:
         ("lead", "lead@accelerator.local", "Migration Lead", RoleName.MIGRATION_LEAD.value),
         ("engineer", "engineer@accelerator.local", "Data Engineer", RoleName.ENGINEER.value),
         ("reviewer", "reviewer@accelerator.local", "Code Reviewer", RoleName.REVIEWER.value),
-        ("approver", "approver@accelerator.local", "Client Data Owner", RoleName.CLIENT_APPROVER.value),
+        (
+            "approver",
+            "approver@accelerator.local",
+            "Client Data Owner",
+            RoleName.CLIENT_APPROVER.value,
+        ),
         ("viewer", "viewer@accelerator.local", "Stakeholder Viewer", RoleName.VIEWER.value),
     ]
     for username, email, full_name, role_name in default_users:

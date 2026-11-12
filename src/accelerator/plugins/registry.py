@@ -159,7 +159,10 @@ def build_default_registry() -> PluginRegistry:
     reg.register(AirbyteMover(), aliases=["airbyte"])
 
     # Validators
-    reg.register(SqlPushdownValidator(), aliases=["sql_validator", "snowflake", "databricks", "fabric", "duckdb", "sqlite"])
+    reg.register(
+        SqlPushdownValidator(),
+        aliases=["sql_validator", "snowflake", "databricks", "fabric", "duckdb", "sqlite"],
+    )
 
     reg.discover_entrypoints()
     return reg

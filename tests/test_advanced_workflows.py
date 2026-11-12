@@ -46,7 +46,9 @@ def test_sql_parsers_and_vendor_wrappers() -> None:
         target=TargetConfig(platform="databricks", output="dbt"),
     )
     bundle = reg.get_generator("lakebridge_wrapper").generate_package(bteq_pkg, {}, cfg)
-    assert any("Databricks Lakebridge" in f.content for f in bundle.files if f.artifact_kind == "dbt_model")
+    assert any(
+        "Databricks Lakebridge" in f.content for f in bundle.files if f.artifact_kind == "dbt_model"
+    )
 
 
 def test_incremental_watermark_move_and_job_reconcile(isolated_env: Path) -> None:
@@ -55,8 +57,12 @@ def test_incremental_watermark_move_and_job_reconcile(isolated_env: Path) -> Non
 
     s_conn = duckdb.connect(str(src_db))
     s_conn.execute("CREATE SCHEMA dbo;")
-    s_conn.execute("CREATE TABLE dbo.events (event_id INT PRIMARY KEY, amount DOUBLE, updated_at VARCHAR);")
-    s_conn.execute("INSERT INTO dbo.events VALUES (1, 10.0, '2026-01-01'), (2, 20.0, '2026-01-02');")
+    s_conn.execute(
+        "CREATE TABLE dbo.events (event_id INT PRIMARY KEY, amount DOUBLE, updated_at VARCHAR);"
+    )
+    s_conn.execute(
+        "INSERT INTO dbo.events VALUES (1, 10.0, '2026-01-01'), (2, 20.0, '2026-01-02');"
+    )
     s_conn.close()
     duckdb.connect(str(tgt_db)).close()
 

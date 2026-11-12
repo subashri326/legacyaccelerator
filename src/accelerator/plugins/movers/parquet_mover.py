@@ -81,11 +81,7 @@ def build_native_bulk_load_sql(
             f"FILEFORMAT = PARQUET\n"
             f"COPY_OPTIONS ('mergeSchema' = 'true');"
         )
-    return (
-        f"COPY INTO {fqn}\n"
-        f"FROM '{parquet_uri}'\n"
-        f"WITH (FILE_TYPE = 'PARQUET');"
-    )
+    return f"COPY INTO {fqn}\nFROM '{parquet_uri}'\nWITH (FILE_TYPE = 'PARQUET');"
 
 
 class ParquetMover(Mover):
@@ -95,7 +91,12 @@ class ParquetMover(Mover):
         plugin_type="Mover",
         name="parquet_mover",
         version="0.1.0",
-        supported_versions=["Snowflake COPY INTO", "Databricks COPY/AutoLoader", "Fabric COPY", "DuckDB/SQLite"],
+        supported_versions=[
+            "Snowflake COPY INTO",
+            "Databricks COPY/AutoLoader",
+            "Fabric COPY",
+            "DuckDB/SQLite",
+        ],
         capabilities={"bulk": True, "incremental_watermark": True, "checkpointing": True},
         description="Extracts partitioned chunks to Parquet in cloud/local storage and loads targets idempotently.",
     )
@@ -122,14 +123,16 @@ class ParquetMover(Mover):
             if src_kind == "sqlite" and not _sqlite_or_duck_exists("sqlite", src_conn, table):
                 src_tbl_sql = f'"{table.name}"'
 
-            wm_col = config.movement.watermark_columns.get(table.fqn) or config.movement.watermark_columns.get(
-                f"{table.schema_name}.{table.name}"
-            )
+            wm_col = config.movement.watermark_columns.get(
+                table.fqn
+            ) or config.movement.watermark_columns.get(f"{table.schema_name}.{table.name}")
             where_clause = ""
             if mode == "incremental" and wm_col and watermark_value:
                 where_clause = f" WHERE {wm_col} > '{watermark_value}'"
 
-            count_rows = src_conn.execute(f"SELECT COUNT(*) FROM {src_tbl_sql}{where_clause}").fetchall()
+            count_rows = src_conn.execute(
+                f"SELECT COUNT(*) FROM {src_tbl_sql}{where_clause}"
+            ).fetchall()
             total_rows = int(count_rows[0][0]) if count_rows else 0
             part_size = max(1, config.movement.partition_size_rows)
             num_parts = max(1, (total_rows + part_size - 1) // part_size)
@@ -174,8 +177,13 @@ class ParquetMover(Mover):
         # Stage Parquet chunks (can run concurrently for large estates)
         staged_uris: dict[int, str] = {}
         if staging_writer is not None and extracted_chunks:
-            with ThreadPoolExecutor(max_workers=min(config.movement.parallelism, len(extracted_chunks))) as pool:
-                futs = {pool.submit(staging_writer, p_idx, pq_bytes): p_idx for p_idx, _, _, pq_bytes, _ in extracted_chunks}
+            with ThreadPoolExecutor(
+                max_workers=min(config.movement.parallelism, len(extracted_chunks))
+            ) as pool:
+                futs = {
+                    pool.submit(staging_writer, p_idx, pq_bytes): p_idx
+                    for p_idx, _, _, pq_bytes, _ in extracted_chunks
+                }
                 for fut, p_idx in futs.items():
                     staged_uris[p_idx] = fut.result()
 
@@ -201,14 +209,24 @@ class ParquetMover(Mover):
                         tbl_exists = _sqlite_or_duck_exists("duckdb", tgt_conn, table)
                         tgt_conn.register("_l2c_chunk_arrow", chunk_arrow)
                         if not tbl_exists:
-                            tgt_conn.execute(f"CREATE TABLE {tgt_tbl_sql} AS SELECT * FROM _l2c_chunk_arrow")
+                            tgt_conn.execute(
+                                f"CREATE TABLE {tgt_tbl_sql} AS SELECT * FROM _l2c_chunk_arrow"
+                            )
                         else:
-                            tgt_conn.execute(f"INSERT INTO {tgt_tbl_sql} SELECT * FROM _l2c_chunk_arrow")
+                            tgt_conn.execute(
+                                f"INSERT INTO {tgt_tbl_sql} SELECT * FROM _l2c_chunk_arrow"
+                            )
                         tgt_conn.unregister("_l2c_chunk_arrow")
                     else:
                         tbl_name_sqlite = f"{table.schema_name}.{table.name}"
-                        if_exists = "replace" if (mode == "bulk" and p_idx == 0 and not completed_set) else "append"
-                        chunk_arrow.to_pandas().to_sql(tbl_name_sqlite, tgt_conn, if_exists=if_exists, index=False)
+                        if_exists = (
+                            "replace"
+                            if (mode == "bulk" and p_idx == 0 and not completed_set)
+                            else "append"
+                        )
+                        chunk_arrow.to_pandas().to_sql(
+                            tbl_name_sqlite, tgt_conn, if_exists=if_exists, index=False
+                        )
 
                     rows_n = chunk_rows
                     total_loaded += rows_n
@@ -224,7 +242,9 @@ class ParquetMover(Mover):
                         )
                     )
                     native_copy_statements.append(
-                        build_native_bulk_load_sql(config.target.platform, table.schema_name, table.name, p_uri)
+                        build_native_bulk_load_sql(
+                            config.target.platform, table.schema_name, table.name, p_uri
+                        )
                     )
                 if tgt_kind == "sqlite":
                     tgt_conn.commit()
@@ -236,7 +256,9 @@ class ParquetMover(Mover):
                 rows_n = len(df)
                 total_loaded += rows_n
                 native_copy_statements.append(
-                    build_native_bulk_load_sql(config.target.platform, table.schema_name, table.name, p_uri)
+                    build_native_bulk_load_sql(
+                        config.target.platform, table.schema_name, table.name, p_uri
+                    )
                 )
                 partition_results.append(
                     PartitionResult(
@@ -264,6 +286,8 @@ class ParquetMover(Mover):
         )
 
     def run_golden_check(self) -> tuple[bool, str]:
-        sql = build_native_bulk_load_sql("snowflake", "CURATED", "ORDERS", "s3://bucket/orders.parquet")
+        sql = build_native_bulk_load_sql(
+            "snowflake", "CURATED", "ORDERS", "s3://bucket/orders.parquet"
+        )
         ok = "COPY INTO CURATED.ORDERS" in sql and "FILE_FORMAT = (TYPE = PARQUET)" in sql
         return ok, "ParquetMover golden check passed" if ok else "Failed golden check"

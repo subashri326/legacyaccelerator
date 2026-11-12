@@ -45,10 +45,14 @@ class DataStageParser(Parser):
 
     def parse_artifact(self, artifact_name: str, content_bytes: bytes) -> PackageIR:
         text = content_bytes.decode("utf-8", errors="replace")
-        job_match = re.search(r'BEGIN\s+DSJOB.*?Identifier\s+"([^"]+)"', text, re.DOTALL | re.IGNORECASE)
+        job_match = re.search(
+            r'BEGIN\s+DSJOB.*?Identifier\s+"([^"]+)"', text, re.DOTALL | re.IGNORECASE
+        )
         job_name = job_match.group(1) if job_match else artifact_name.removesuffix(".dsx")
 
-        records = re.findall(r"BEGIN\s+DSRECORD(.*?)END\s+DSRECORD", text, re.DOTALL | re.IGNORECASE)
+        records = re.findall(
+            r"BEGIN\s+DSRECORD(.*?)END\s+DSRECORD", text, re.DOTALL | re.IGNORECASE
+        )
         nodes: list[NodeIR] = []
         edges: list[EdgeIR] = []
         opaque_items: list[OpaqueSnippetIR] = []
@@ -70,7 +74,9 @@ class DataStageParser(Parser):
                 low_s = stype.lower()
                 operator = DS_STAGE_MAP.get(low_s, NodeOperator.OPAQUE)
                 if (
-                    "target" in rec_name.lower() or "tgt" in rec_name.lower() or "out" in rec_name.lower()
+                    "target" in rec_name.lower()
+                    or "tgt" in rec_name.lower()
+                    or "out" in rec_name.lower()
                 ) and operator == NodeOperator.SOURCE:
                     operator = NodeOperator.TARGET
                 if "custom" in low_s or "routine" in low_s:
@@ -127,7 +133,9 @@ class DataStageParser(Parser):
                 src = link_endpoints.get(p1, {}).get("from")
                 tgt = link_endpoints.get(p2, {}).get("to")
                 if src and tgt and src in stage_names and tgt in stage_names:
-                    edges.append(EdgeIR(id=f"{src}_{tgt}_{p1}", source_node_id=src, target_node_id=tgt))
+                    edges.append(
+                        EdgeIR(id=f"{src}_{tgt}_{p1}", source_node_id=src, target_node_id=tgt)
+                    )
 
         # Deduplicate edges
         unique_edges = {(e.source_node_id, e.target_node_id): e for e in edges}
@@ -187,5 +195,9 @@ class DataStageParser(Parser):
    END DSRECORD
 END DSJOB"""
         pkg = self.parse_artifact("ds_product_dim.dsx", sample)
-        ok = len(pkg.data_flows) == 1 and len(pkg.data_flows[0].nodes) == 3 and len(pkg.data_flows[0].edges) == 2
+        ok = (
+            len(pkg.data_flows) == 1
+            and len(pkg.data_flows[0].nodes) == 3
+            and len(pkg.data_flows[0].edges) == 2
+        )
         return ok, "DataStageParser golden check passed" if ok else "Failed golden check"

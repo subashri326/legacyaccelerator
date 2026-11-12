@@ -55,7 +55,9 @@ def ensure_project_from_config(
 
     client = db.query(Client).filter(Client.slug == cfg.client).first()
     if client is None:
-        client = Client(slug=cfg.client, name=cfg.client.replace("_", " ").title(), created_by=actor)
+        client = Client(
+            slug=cfg.client, name=cfg.client.replace("_", " ").title(), created_by=actor
+        )
         db.add(client)
         db.flush()
 
@@ -146,7 +148,9 @@ def ensure_project_from_config(
         .first()
     )
     next_ver = (max_ver.version_num + 1) if max_ver else 1
-    db.query(ConfigVersion).filter(ConfigVersion.project_id == project.id).update({"is_active": False})
+    db.query(ConfigVersion).filter(ConfigVersion.project_id == project.id).update(
+        {"is_active": False}
+    )
 
     new_cfg = ConfigVersion(
         project_id=project.id,

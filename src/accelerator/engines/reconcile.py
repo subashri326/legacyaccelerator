@@ -171,7 +171,9 @@ class ReconcileEngine:
                     target_metrics=outcome.target_metrics,
                     diff_summary=outcome.diff_summary,
                     evidence_uri=evidence_uri,
-                    retention_expires_at=retention_dt if "l4_diff" in outcome.diff_summary else None,
+                    retention_expires_at=retention_dt
+                    if "l4_diff" in outcome.diff_summary
+                    else None,
                     created_by=actor,
                 )
                 db.add(res_row)
@@ -180,12 +182,26 @@ class ReconcileEngine:
                 if outcome.verdict == "pass":
                     passed += 1
                     StateMachine.advance(
-                        db, project_id, obj.fqn, "table", ObjectState.VALIDATED, actor, "recon_run", recon_run.id
+                        db,
+                        project_id,
+                        obj.fqn,
+                        "table",
+                        ObjectState.VALIDATED,
+                        actor,
+                        "recon_run",
+                        recon_run.id,
                     )
                 elif outcome.verdict == "pass_within_tolerance":
                     within_tol += 1
                     StateMachine.advance(
-                        db, project_id, obj.fqn, "table", ObjectState.VALIDATED, actor, "recon_run", recon_run.id
+                        db,
+                        project_id,
+                        obj.fqn,
+                        "table",
+                        ObjectState.VALIDATED,
+                        actor,
+                        "recon_run",
+                        recon_run.id,
                     )
                 else:
                     failed += 1

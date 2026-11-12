@@ -17,8 +17,16 @@ def create_celery_app() -> Any:
 
     app = Celery("l2c_accelerator", broker=CELERY_BROKER_URL, backend=CELERY_BACKEND_URL)
 
-    @app.task(name="l2c.run_stage", bind=True, autoretry_for=(Exception,), retry_backoff=True, max_retries=3)
-    def run_stage_task(_self: Any, stage: str, project_id: str, actor: str = "celery") -> dict[str, Any]:
+    @app.task(
+        name="l2c.run_stage",
+        bind=True,
+        autoretry_for=(Exception,),
+        retry_backoff=True,
+        max_retries=3,
+    )
+    def run_stage_task(
+        _self: Any, stage: str, project_id: str, actor: str = "celery"
+    ) -> dict[str, Any]:
         orch = RunOrchestrator()
         with session_scope() as db:
             if stage == "discover":

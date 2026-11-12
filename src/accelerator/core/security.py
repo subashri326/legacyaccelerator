@@ -152,7 +152,9 @@ def mask_row_sample(row: dict[str, Any], masked_columns: list[str]) -> dict[str,
     output: dict[str, Any] = {}
     for key, val in row.items():
         key_l = key.lower()
-        if key_l in masked_lower or any(tok in key_l for tok in ("ssn", "secret", "password", "token")):
+        if key_l in masked_lower or any(
+            tok in key_l for tok in ("ssn", "secret", "password", "token")
+        ):
             output[key] = mask_value(val)
         else:
             output[key] = val

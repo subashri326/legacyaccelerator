@@ -36,7 +36,9 @@ def _seed_acme(tmp_path: Path) -> tuple[str, Path, Path]:
 
     raw_yaml = Path("examples/acme_retail/client_config.yaml").read_text(encoding="utf-8")
     with session_scope() as db:
-        proj, _, _ = ensure_project_from_config(db, raw_yaml, actor="lead", actor_role="migration_lead")
+        proj, _, _ = ensure_project_from_config(
+            db, raw_yaml, actor="lead", actor_role="migration_lead"
+        )
         return proj.id, src_db, tgt_db
 
 
@@ -66,7 +68,9 @@ def test_full_six_stage_e2e_and_signoff(isolated_env: Path) -> None:
     # 3. Convert + Git PR delivery
     git_repo = isolated_env / "target_repo"
     with session_scope() as db:
-        c = ConvertEngine().run(db, project_id, deliver_git=True, git_repo_path=git_repo, actor="eng")
+        c = ConvertEngine().run(
+            db, project_id, deliver_git=True, git_repo_path=git_repo, actor="eng"
+        )
         assert c.files_generated >= 8
         assert c.compile_failed_count == 0
         assert c.residue_items_opened >= 1
@@ -82,13 +86,25 @@ def test_full_six_stage_e2e_and_signoff(isolated_env: Path) -> None:
         # AI assist proposes fix -> Human accepts -> Now deploy succeeds!
         res_item = (
             db.query(ResidueItem)
-            .filter(ResidueItem.project_id == project_id, ResidueItem.object_key == "Load_Customers_And_Orders")
+            .filter(
+                ResidueItem.project_id == project_id,
+                ResidueItem.object_key == "Load_Customers_And_Orders",
+            )
             .first()
         )
         assert res_item is not None
-        ConvertEngine().propose_ai_fix(db, project_id, res_item.id, actor="eng", actor_role="engineer")
+        ConvertEngine().propose_ai_fix(
+            db, project_id, res_item.id, actor="eng", actor_role="engineer"
+        )
         ConvertEngine().decide_residue(
-            db, project_id, res_item.id, "approved", None, "Looks good", actor="reviewer", actor_role="reviewer"
+            db,
+            project_id,
+            res_item.id,
+            "approved",
+            None,
+            "Looks good",
+            actor="reviewer",
+            actor_role="reviewer",
         )
         st = ConvertEngine().approve_and_deploy_object(
             db, project_id, "Load_Customers_And_Orders", actor="eng", actor_role="engineer"
@@ -162,7 +178,10 @@ def test_full_six_stage_e2e_and_signoff(isolated_env: Path) -> None:
         assert r_fail.failed == 1
         latest_res = (
             db.query(ReconResult)
-            .filter(ReconResult.project_id == project_id, ReconResult.object_key == "legacy_ddl.dbo.customers")
+            .filter(
+                ReconResult.project_id == project_id,
+                ReconResult.object_key == "legacy_ddl.dbo.customers",
+            )
             .order_by(ReconResult.created_at.desc())
             .first()
         )

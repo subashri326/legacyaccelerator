@@ -32,16 +32,22 @@ def init() -> None:
     init_db()
     with session_scope() as db:
         entries = get_plugin_registry().sync_to_db(db)
-    console.print(f"[green]Initialized metadata database and synced {len(entries)} plugins.[/green]")
+    console.print(
+        f"[green]Initialized metadata database and synced {len(entries)} plugins.[/green]"
+    )
 
 
 @app.command()
-def register(config_path: Path = typer.Argument(..., exists=True, help="Path to client YAML config")) -> None:
+def register(
+    config_path: Path = typer.Argument(..., exists=True, help="Path to client YAML config"),
+) -> None:
     """Register or update a client configuration YAML in the metadata database."""
     init_db()
     raw_yaml = config_path.read_text(encoding="utf-8")
     with session_scope() as db:
-        project, cfg_ver, cfg = ensure_project_from_config(db, raw_yaml, actor="cli", actor_role="admin")
+        project, cfg_ver, cfg = ensure_project_from_config(
+            db, raw_yaml, actor="cli", actor_role="admin"
+        )
     console.print(
         f"[green]Registered[/green] client=[bold]{cfg.client}[/bold] "
         f"project_id=[bold]{project.id}[/bold] config_v{cfg_ver.version_num} ({cfg_ver.config_hash[:10]})"
@@ -89,7 +95,12 @@ def convert(
     """Stage 3: Generate target DDL, dbt/SQL/PySpark, orchestration, and residue queue."""
     with session_scope() as db:
         res = ConvertEngine().run(
-            db, project_id, wave_id=wave_id, deliver_git=deliver_git, actor="cli", actor_role="engineer"
+            db,
+            project_id,
+            wave_id=wave_id,
+            deliver_git=deliver_git,
+            actor="cli",
+            actor_role="engineer",
         )
     console.print(res)
 
@@ -102,7 +113,9 @@ def move(
 ) -> None:
     """Stage 4: Execute partitioned Parquet bulk or incremental watermark load."""
     with session_scope() as db:
-        res = MoveEngine().run(db, project_id, wave_id=wave_id, mode=mode, actor="cli", actor_role="engineer")
+        res = MoveEngine().run(
+            db, project_id, wave_id=wave_id, mode=mode, actor="cli", actor_role="engineer"
+        )
     console.print(res)
 
 
@@ -113,7 +126,9 @@ def reconcile(
 ) -> None:
     """Stage 5: Execute pushed-down reconciliation checks."""
     with session_scope() as db:
-        res = ReconcileEngine().run(db, project_id, level_override=level, actor="cli", actor_role="engineer")
+        res = ReconcileEngine().run(
+            db, project_id, level_override=level, actor="cli", actor_role="engineer"
+        )
     console.print(res)
 
 
@@ -147,7 +162,9 @@ def track(project_id: str) -> None:
         tbl.add_row(state, str(cnt))
     console.print(tbl)
     if dash["blockers"]:
-        console.print(f"[yellow]Active blockers ({len(dash['blockers'])}):[/yellow] {dash['blockers']}")
+        console.print(
+            f"[yellow]Active blockers ({len(dash['blockers'])}):[/yellow] {dash['blockers']}"
+        )
 
 
 @app.command()
@@ -160,13 +177,20 @@ def signoff(
     """Record client approver sign-off for a validated object."""
     with session_scope() as db:
         row = TrackEngine().sign_off(
-            db, project_id, object_key=object_key, approver=approver, approver_role="client_approver", notes=notes
+            db,
+            project_id,
+            object_key=object_key,
+            approver=approver,
+            approver_role="client_approver",
+            notes=notes,
         )
     console.print(f"[green]Signed off[/green] {object_key} -> {row.evidence_bundle_uri}")
 
 
 @app.command()
-def plugins(run_golden: bool = typer.Option(False, "--run-golden", help="Run plugin golden checks")) -> None:
+def plugins(
+    run_golden: bool = typer.Option(False, "--run-golden", help="Run plugin golden checks"),
+) -> None:
     """List installed plugins and optionally execute their golden test checks."""
     reg = get_plugin_registry()
     tbl = Table(title="Registered Accelerator Plugins")

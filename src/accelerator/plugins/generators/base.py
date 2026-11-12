@@ -118,7 +118,9 @@ class BaseTargetGenerator(TargetGenerator):
         return self._apply_case(clean, config.naming.table_case)
 
     def resolve_column_name(self, raw_name: str, config: ClientConfig) -> str:
-        return self._apply_case(raw_name.replace("[", "").replace("]", ""), config.naming.column_case)
+        return self._apply_case(
+            raw_name.replace("[", "").replace("]", ""), config.naming.column_case
+        )
 
     @staticmethod
     def _apply_case(value: str, mode: str) -> str:
@@ -139,7 +141,22 @@ class BaseTargetGenerator(TargetGenerator):
         mapped_base = platform_map.get(base_token, source_type.upper())
         # Preserve precision/scale/length parameters when target expects them
         param_match = re.search(r"\(([^)]+)\)", source_type)
-        if param_match and "(" not in mapped_base and mapped_base not in ("BOOLEAN", "DATE", "TIMESTAMP", "TIMESTAMP_NTZ", "STRING", "INT", "BIGINT", "FLOAT", "DOUBLE"):
+        if (
+            param_match
+            and "(" not in mapped_base
+            and mapped_base
+            not in (
+                "BOOLEAN",
+                "DATE",
+                "TIMESTAMP",
+                "TIMESTAMP_NTZ",
+                "STRING",
+                "INT",
+                "BIGINT",
+                "FLOAT",
+                "DOUBLE",
+            )
+        ):
             return f"{mapped_base}({param_match.group(1)})"
         return mapped_base
 
@@ -222,11 +239,19 @@ class BaseTargetGenerator(TargetGenerator):
             if node.operator == NodeOperator.OPAQUE or custom_reason:
                 if node.id in accepted:
                     cte_names[node.id] = cte_name
-                    ctes.append(f"{cte_name} AS (\n    -- Human-accepted replacement\n    {accepted[node.id]}\n)")
+                    ctes.append(
+                        f"{cte_name} AS (\n    -- Human-accepted replacement\n    {accepted[node.id]}\n)"
+                    )
                 else:
-                    snippet = node.opaque.original_snippet if node.opaque else f"{node.name} ({node.source_component_type})"
+                    snippet = (
+                        node.opaque.original_snippet
+                        if node.opaque
+                        else f"{node.name} ({node.source_component_type})"
+                    )
                     reason_code = node.opaque.reason_code if node.opaque else "CUSTOM_RULE_MANUAL"
-                    reason_detail = custom_reason or (node.opaque.reason_detail if node.opaque else "Flagged for manual review")
+                    reason_detail = custom_reason or (
+                        node.opaque.reason_detail if node.opaque else "Flagged for manual review"
+                    )
                     residues.append(
                         GeneratedResidue(
                             object_key=df.id,
@@ -260,14 +285,17 @@ class BaseTargetGenerator(TargetGenerator):
             elif node.operator == NodeOperator.FILTER:
                 cond_sql = "1 = 1"
                 if node.condition and node.condition.neutral_sql:
-                    cond_sql = ExpressionConverter.render_target(node.condition.neutral_sql, self.platform)
+                    cond_sql = ExpressionConverter.render_target(
+                        node.condition.neutral_sql, self.platform
+                    )
                 elif node.condition and node.condition.is_opaque:
                     residues.append(
                         GeneratedResidue(
                             object_key=df.id,
                             component_name=node.name,
                             reason_code="EXPRESSION_OPAQUE",
-                            reason_detail=node.condition.opaque_reason or "Unparsed filter expression",
+                            reason_detail=node.condition.opaque_reason
+                            or "Unparsed filter expression",
                             original_snippet=node.condition.original_expr,
                         )
                     )
@@ -277,7 +305,9 @@ class BaseTargetGenerator(TargetGenerator):
             elif node.operator == NodeOperator.EXPRESSION:
                 proj: list[str] = ["*"]
                 for expr in node.expressions:
-                    col_alias = self.resolve_column_name(expr.target_column or "derived_col", config)
+                    col_alias = self.resolve_column_name(
+                        expr.target_column or "derived_col", config
+                    )
                     if expr.is_opaque:
                         residues.append(
                             GeneratedResidue(
@@ -290,7 +320,9 @@ class BaseTargetGenerator(TargetGenerator):
                         )
                         proj.append(f"NULL AS {col_alias} /* TODO: {expr.original_expr} */")
                     else:
-                        rendered = ExpressionConverter.render_target(expr.neutral_sql, self.platform)
+                        rendered = ExpressionConverter.render_target(
+                            expr.neutral_sql, self.platform
+                        )
                         proj.append(f"{rendered} AS {col_alias}")
                 cte_names[node.id] = cte_name
                 ctes.append(f"{cte_name} AS (\n    SELECT {', '.join(proj)} FROM {prev_cte}\n)")
@@ -331,7 +363,11 @@ class BaseTargetGenerator(TargetGenerator):
                 for r in node.routes:
                     cond = r.get("condition") or "1=1"
                     route_cases.append(f"WHEN {cond} THEN '{r.get('name', 'route')}'")
-                case_expr = f"CASE {' '.join(route_cases)} ELSE 'default' END AS _route_branch" if route_cases else "'default' AS _route_branch"
+                case_expr = (
+                    f"CASE {' '.join(route_cases)} ELSE 'default' END AS _route_branch"
+                    if route_cases
+                    else "'default' AS _route_branch"
+                )
                 cte_names[node.id] = cte_name
                 ctes.append(f"{cte_name} AS (\n    SELECT *, {case_expr} FROM {prev_cte}\n)")
 
@@ -417,16 +453,21 @@ class BaseTargetGenerator(TargetGenerator):
         # Evaluate custom rules at task level as well
         for task in package.tasks:
             custom_reason = self._matches_custom_manual_rule(task.task_type, config)
-            if (task.task_type == "opaque" or custom_reason) and task.id not in (accepted_overrides or {}):
+            if (task.task_type == "opaque" or custom_reason) and task.id not in (
+                accepted_overrides or {}
+            ):
                 residues.append(
-                        GeneratedResidue(
-                            object_key=package.id,
-                            component_name=task.name,
-                            reason_code=task.opaque.reason_code if task.opaque else "TASK_MANUAL_RULE",
-                            reason_detail=custom_reason or (task.opaque.reason_detail if task.opaque else "Manual task"),
-                            original_snippet=task.opaque.original_snippet if task.opaque else (task.sql_statement or task.name),
-                        )
+                    GeneratedResidue(
+                        object_key=package.id,
+                        component_name=task.name,
+                        reason_code=task.opaque.reason_code if task.opaque else "TASK_MANUAL_RULE",
+                        reason_detail=custom_reason
+                        or (task.opaque.reason_detail if task.opaque else "Manual task"),
+                        original_snippet=task.opaque.original_snippet
+                        if task.opaque
+                        else (task.sql_statement or task.name),
                     )
+                )
 
         for df in package.data_flows:
             sql_body, df_res = self._flow_to_sql_ctes(df, config, accepted_overrides)

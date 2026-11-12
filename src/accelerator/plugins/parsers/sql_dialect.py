@@ -48,7 +48,11 @@ def _parse_sql_to_ir(artifact_name: str, sql_text: str, source_tool: str) -> Pac
     for idx, chunk in enumerate(raw_chunks, start=1):
         task_id = f"sql_step_{idx}"
         # Detect procedural / dynamic constructs that require review
-        if re.search(r"\b(?:EXEC|EXECUTE\s+IMMEDIATE|sp_executesql|CURSOR|WHILE|GOTO)\b", chunk, re.IGNORECASE):
+        if re.search(
+            r"\b(?:EXEC|EXECUTE\s+IMMEDIATE|sp_executesql|CURSOR|WHILE|GOTO)\b",
+            chunk,
+            re.IGNORECASE,
+        ):
             opaque = OpaqueSnippetIR(
                 node_id=task_id,
                 component_name=f"{artifact_name}#step_{idx}",
@@ -183,7 +187,9 @@ def _parse_sql_to_ir(artifact_name: str, sql_text: str, source_tool: str) -> Pac
                 )
 
         if prev_task_id is not None:
-            task_deps.append(TaskDependencyIR(upstream_task_id=prev_task_id, downstream_task_id=task_id))
+            task_deps.append(
+                TaskDependencyIR(upstream_task_id=prev_task_id, downstream_task_id=task_id)
+            )
         prev_task_id = task_id
 
     for b_idx, cmd in enumerate(bteq_commands, start=1):
@@ -222,12 +228,16 @@ class _BaseSqlParser(Parser):
     source_tool: str = "tsql"
 
     def parse_artifact(self, artifact_name: str, content_bytes: bytes) -> PackageIR:
-        return _parse_sql_to_ir(artifact_name, content_bytes.decode("utf-8", errors="replace"), self.source_tool)
+        return _parse_sql_to_ir(
+            artifact_name, content_bytes.decode("utf-8", errors="replace"), self.source_tool
+        )
 
     def run_golden_check(self) -> tuple[bool, str]:
         sample = b"INSERT INTO dbo.tgt SELECT id, amt FROM dbo.src WHERE amt > 10;"
         pkg = self.parse_artifact("golden.sql", sample)
-        ok = len(pkg.data_flows) == 1 and any(n.operator == NodeOperator.SOURCE for n in pkg.data_flows[0].nodes)
+        ok = len(pkg.data_flows) == 1 and any(
+            n.operator == NodeOperator.SOURCE for n in pkg.data_flows[0].nodes
+        )
         return ok, f"{self.manifest.name} golden check passed" if ok else "Failed golden check"
 
 

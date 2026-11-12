@@ -32,18 +32,29 @@ def test_api_rbac_and_full_flow(isolated_env: Path) -> None:
         assert client.get("/healthz").status_code == 200
 
         # Login as viewer -> cannot register config or run pipeline (403)
-        v_login = client.post("/api/v1/auth/login", json={"username": "viewer", "password": "admin123!"})
+        v_login = client.post(
+            "/api/v1/auth/login", json={"username": "viewer", "password": "admin123!"}
+        )
         assert v_login.status_code == 200
         v_headers = {"Authorization": f"Bearer {v_login.json()['access_token']}"}
         raw_yaml = Path("examples/acme_retail/client_config.yaml").read_text(encoding="utf-8")
-        assert client.post("/api/v1/projects/register-yaml", json={"raw_yaml": raw_yaml}, headers=v_headers).status_code == 403
+        assert (
+            client.post(
+                "/api/v1/projects/register-yaml", json={"raw_yaml": raw_yaml}, headers=v_headers
+            ).status_code
+            == 403
+        )
 
         # Login as admin -> register project & run pipeline
-        a_login = client.post("/api/v1/auth/login", json={"username": "admin", "password": "admin123!"})
+        a_login = client.post(
+            "/api/v1/auth/login", json={"username": "admin", "password": "admin123!"}
+        )
         assert a_login.status_code == 200
         a_headers = {"Authorization": f"Bearer {a_login.json()['access_token']}"}
 
-        reg_resp = client.post("/api/v1/projects/register-yaml", json={"raw_yaml": raw_yaml}, headers=a_headers)
+        reg_resp = client.post(
+            "/api/v1/projects/register-yaml", json={"raw_yaml": raw_yaml}, headers=a_headers
+        )
         assert reg_resp.status_code == 200
         pid = reg_resp.json()["project_id"]
 
@@ -52,7 +63,9 @@ def test_api_rbac_and_full_flow(isolated_env: Path) -> None:
         assert pipe_resp.json()["reconcile"]["passed"] == 5
 
         # Engineer cannot perform Client Approver Sign-Off (403)!
-        e_login = client.post("/api/v1/auth/login", json={"username": "engineer", "password": "admin123!"})
+        e_login = client.post(
+            "/api/v1/auth/login", json={"username": "engineer", "password": "admin123!"}
+        )
         e_headers = {"Authorization": f"Bearer {e_login.json()['access_token']}"}
         assert (
             client.post(
@@ -64,7 +77,9 @@ def test_api_rbac_and_full_flow(isolated_env: Path) -> None:
         )
 
         # Client Approver CAN sign off validated table (200)!
-        ap_login = client.post("/api/v1/auth/login", json={"username": "approver", "password": "admin123!"})
+        ap_login = client.post(
+            "/api/v1/auth/login", json={"username": "approver", "password": "admin123!"}
+        )
         ap_headers = {"Authorization": f"Bearer {ap_login.json()['access_token']}"}
         so_resp = client.post(
             f"/api/v1/projects/{pid}/signoff",
@@ -74,7 +89,10 @@ def test_api_rbac_and_full_flow(isolated_env: Path) -> None:
         assert so_resp.status_code == 200
 
         # Steering summary & Prometheus metrics endpoints
-        assert client.get(f"/api/v1/projects/{pid}/exports/steering", headers=v_headers).status_code == 200
+        assert (
+            client.get(f"/api/v1/projects/{pid}/exports/steering", headers=v_headers).status_code
+            == 200
+        )
         assert "l2c_stage_runs_total" in client.get("/metrics").text
 
 

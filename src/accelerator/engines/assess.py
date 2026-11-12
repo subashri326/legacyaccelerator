@@ -86,7 +86,11 @@ class AssessEngine:
             for job in etl_jobs:
                 if not job.source_artifact_id:
                     continue
-                art = db.query(SourceArtifact).filter(SourceArtifact.id == job.source_artifact_id).first()
+                art = (
+                    db.query(SourceArtifact)
+                    .filter(SourceArtifact.id == job.source_artifact_id)
+                    .first()
+                )
                 if art is None:
                     continue
                 raw_bytes = self.store.get_bytes(art.storage_uri)
@@ -95,7 +99,9 @@ class AssessEngine:
                 pkg.id = job.job_name
                 pkg.name = job.job_name
                 ir_packages[job.job_name] = pkg
-                self._persist_ir_and_components(db, project_id, job, None, pkg, actor, art.id, art.content_hash)
+                self._persist_ir_and_components(
+                    db, project_id, job, None, pkg, actor, art.id, art.content_hash
+                )
 
             for obj in db_objects:
                 if obj.object_type in ("VIEW", "PROCEDURE") and obj.definition_sql:
@@ -108,7 +114,14 @@ class AssessEngine:
                     pkg.name = obj.fqn
                     ir_packages[obj.fqn] = pkg
                     self._persist_ir_and_components(
-                        db, project_id, None, obj, pkg, actor, obj.source_artifact_id, obj.content_hash
+                        db,
+                        project_id,
+                        None,
+                        obj,
+                        pkg,
+                        actor,
+                        obj.source_artifact_id,
+                        obj.content_hash,
                     )
 
             # 2. Build cross-tool Lineage Graph (tables, views, procedures, ETL jobs)
@@ -127,7 +140,14 @@ class AssessEngine:
                     if col.is_foreign_key and col.fk_target:
                         up_fqn = self._resolve_ref(col.fk_target, fqn_lookup)
                         if up_fqn and up_fqn != obj.fqn:
-                            edges_to_save.append((up_fqn, obj.fqn, "fk", [{"from": col.column_name, "to": col.fk_target}]))
+                            edges_to_save.append(
+                                (
+                                    up_fqn,
+                                    obj.fqn,
+                                    "fk",
+                                    [{"from": col.column_name, "to": col.fk_target}],
+                                )
+                            )
 
             # DataFlow IR source -> job -> target dependencies
             for key, pkg in ir_packages.items():
@@ -139,7 +159,9 @@ class AssessEngine:
                         resolved_tbl = self._resolve_ref(node.table_ref, fqn_lookup)
                         if node.operator in (NodeOperator.SOURCE, NodeOperator.LOOKUP):
                             edges_to_save.append((resolved_tbl, key, "reads", []))
-                        elif node.operator == NodeOperator.TARGET and (not is_db_obj or resolved_tbl != key):
+                        elif node.operator == NodeOperator.TARGET and (
+                            not is_db_obj or resolved_tbl != key
+                        ):
                             edges_to_save.append((key, resolved_tbl, "writes", []))
 
             # Replace project lineage edges idempotently
@@ -179,10 +201,28 @@ class AssessEngine:
                 )
                 class_counts[classification] += 1
                 self._save_score_and_effort(
-                    db, project_id, obj.fqn, kind, score, classification, opaque_cnt, reasons, cfg, cfg_ver.id, effort_totals, actor
+                    db,
+                    project_id,
+                    obj.fqn,
+                    kind,
+                    score,
+                    classification,
+                    opaque_cnt,
+                    reasons,
+                    cfg,
+                    cfg_ver.id,
+                    effort_totals,
+                    actor,
                 )
                 StateMachine.advance(
-                    db, project_id, obj.fqn, kind, ObjectState.ASSESSED, actor, "complexity_score", cfg_ver.id
+                    db,
+                    project_id,
+                    obj.fqn,
+                    kind,
+                    ObjectState.ASSESSED,
+                    actor,
+                    "complexity_score",
+                    cfg_ver.id,
                 )
 
             for job in etl_jobs:
@@ -192,10 +232,28 @@ class AssessEngine:
                 )
                 class_counts[classification] += 1
                 self._save_score_and_effort(
-                    db, project_id, job.job_name, "etl_job", score, classification, opaque_cnt, reasons, cfg, cfg_ver.id, effort_totals, actor
+                    db,
+                    project_id,
+                    job.job_name,
+                    "etl_job",
+                    score,
+                    classification,
+                    opaque_cnt,
+                    reasons,
+                    cfg,
+                    cfg_ver.id,
+                    effort_totals,
+                    actor,
                 )
                 StateMachine.advance(
-                    db, project_id, job.job_name, "etl_job", ObjectState.ASSESSED, actor, "complexity_score", cfg_ver.id
+                    db,
+                    project_id,
+                    job.job_name,
+                    "etl_job",
+                    ObjectState.ASSESSED,
+                    actor,
+                    "complexity_score",
+                    cfg_ver.id,
                 )
 
             # 4. Dependency-ordered Wave Planning (no wave ever depends on an unmigrated table!)
@@ -382,7 +440,9 @@ class AssessEngine:
 
         if kind == "table":
             if db_obj and db_obj.is_dead_candidate:
-                reasons.append("Dead object candidate (0 reads in 30d) — confirm archive vs migrate")
+                reasons.append(
+                    "Dead object candidate (0 reads in 30d) — confirm archive vs migrate"
+                )
             return 10, "auto_convertible", 0, reasons
 
         if pkg is None:
@@ -396,7 +456,10 @@ class AssessEngine:
                     score += 35
                     reasons.append(f"Opaque component '{n.name}' ({n.source_component_type})")
                 for rule in cfg.custom_rules:
-                    if rule.action == "flag_manual" and n.source_component_type.lower() in rule.match.lower():
+                    if (
+                        rule.action == "flag_manual"
+                        and n.source_component_type.lower() in rule.match.lower()
+                    ):
                         score += 40
                         opaque_cnt += 1
                         reasons.append(f"Client rule: {rule.reason}")
@@ -411,7 +474,10 @@ class AssessEngine:
                 score += 40
                 reasons.append(f"Manual task '{t.name}'")
             for rule in cfg.custom_rules:
-                if rule.action == "flag_manual" and (t.task_type.lower() in rule.match.lower() or ("scripttask" in rule.match.lower() and t.task_type == "opaque")):
+                if rule.action == "flag_manual" and (
+                    t.task_type.lower() in rule.match.lower()
+                    or ("scripttask" in rule.match.lower() and t.task_type == "opaque")
+                ):
                     reasons.append(f"Client rule: {rule.reason}")
 
         if db_obj and obj_has_proc_complexity(db_obj.definition_sql or ""):
@@ -470,7 +536,11 @@ class AssessEngine:
                     object_key=object_key,
                     target_platform=platform,
                     person_days=days,
-                    breakdown={"base_days": base_days, "platform_multiplier": mult, "classification": classification},
+                    breakdown={
+                        "base_days": base_days,
+                        "platform_multiplier": mult,
+                        "classification": classification,
+                    },
                     created_by=actor,
                 )
             )
@@ -506,8 +576,16 @@ class AssessEngine:
 
         waves_out: list[dict[str, Any]] = []
         for idx, w_num in enumerate(sorted(grouped), start=1):
-            wave_name = f"Wave {idx} ({'Foundation Tables' if idx == 1 else 'Downstream Logic & Curated'})"
-            wave_row = Wave(project_id=project_id, wave_number=idx, name=wave_name, status="planned", created_by=actor)
+            wave_name = (
+                f"Wave {idx} ({'Foundation Tables' if idx == 1 else 'Downstream Logic & Curated'})"
+            )
+            wave_row = Wave(
+                project_id=project_id,
+                wave_number=idx,
+                name=wave_name,
+                status="planned",
+                created_by=actor,
+            )
             db.add(wave_row)
             db.flush()
             members_list = []
@@ -545,10 +623,24 @@ class AssessEngine:
             ws.append([f"Total Effort ({p}) Person-Days", d])
 
         ws_obj = wb.create_sheet("Object Assessment")
-        ws_obj.append(["Object Key", "Kind", "Score", "Classification", "Opaque Items", "Snowflake Days", "Databricks Days", "Fabric Days", "Reasons"])
+        ws_obj.append(
+            [
+                "Object Key",
+                "Kind",
+                "Score",
+                "Classification",
+                "Opaque Items",
+                "Snowflake Days",
+                "Databricks Days",
+                "Fabric Days",
+                "Reasons",
+            ]
+        )
         scores = db.query(ComplexityScore).filter(ComplexityScore.project_id == project_id).all()
         efforts = db.query(EffortEstimate).filter(EffortEstimate.project_id == project_id).all()
-        eff_map: dict[tuple[str, str], float] = {(e.object_key, e.target_platform): e.person_days for e in efforts}
+        eff_map: dict[tuple[str, str], float] = {
+            (e.object_key, e.target_platform): e.person_days for e in efforts
+        }
         for s in scores:
             ws_obj.append(
                 [

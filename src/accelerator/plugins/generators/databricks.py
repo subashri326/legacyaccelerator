@@ -20,7 +20,13 @@ class DatabricksGenerator(BaseTargetGenerator):
         name="databricks_generator",
         version="0.1.0",
         supported_versions=["Databricks Runtime 14+", "Unity Catalog"],
-        capabilities={"ddl": True, "spark_sql": True, "pyspark": True, "dbt": True, "lakeflow_jobs": True},
+        capabilities={
+            "ddl": True,
+            "spark_sql": True,
+            "pyspark": True,
+            "dbt": True,
+            "lakeflow_jobs": True,
+        },
         description="Generates Databricks SQL/PySpark, dbt models, and Lakeflow Jobs definitions.",
     )
 

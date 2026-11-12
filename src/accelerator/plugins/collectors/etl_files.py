@@ -16,7 +16,9 @@ EXTENSION_MAP: dict[str, tuple[str, str]] = {
 }
 
 
-def collect_etl_artifacts(paths: list[str | Path], default_tool: str = "ssis") -> list[CollectedArtifact]:
+def collect_etl_artifacts(
+    paths: list[str | Path], default_tool: str = "ssis"
+) -> list[CollectedArtifact]:
     """Walk given files/directories and collect ETL/SQL exports, unpacking .ispac/.isx zips."""
     artifacts: list[CollectedArtifact] = []
 

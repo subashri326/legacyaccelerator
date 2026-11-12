@@ -116,7 +116,9 @@ class SsisParser(Parser):
         for param_el in root.xpath(".//*[local-name()='PackageParameter']"):
             p_name = _attr(param_el, "ObjectName")
             if p_name:
-                parameters.append(ParameterIR(name=p_name, required=_attr(param_el, "Required") == "1"))
+                parameters.append(
+                    ParameterIR(name=p_name, required=_attr(param_el, "Required") == "1")
+                )
 
         data_flows: list[DataFlowGraphIR] = []
         tasks: list[OrchestrationTaskIR] = []
@@ -154,7 +156,9 @@ class SsisParser(Parser):
         task_deps: list[TaskDependencyIR],
         opaque_items: list[OpaqueSnippetIR],
     ) -> None:
-        exec_containers = parent_el.xpath("./*[local-name()='Executables']/*[local-name()='Executable']")
+        exec_containers = parent_el.xpath(
+            "./*[local-name()='Executables']/*[local-name()='Executable']"
+        )
         for idx, ex in enumerate(exec_containers, start=1):
             ex_name = _attr(ex, "ObjectName") or f"Task_{idx}"
             ex_id = _attr(ex, "DTSID") or _attr(ex, "refId") or ex_name
@@ -213,7 +217,9 @@ class SsisParser(Parser):
                 )
             elif "sequence" in low_type or "forloop" in low_type or "foreach" in low_type:
                 child_tasks: list[OrchestrationTaskIR] = []
-                self._walk_executables(ex, artifact_name, data_flows, child_tasks, task_deps, opaque_items)
+                self._walk_executables(
+                    ex, artifact_name, data_flows, child_tasks, task_deps, opaque_items
+                )
                 tasks.append(
                     OrchestrationTaskIR(
                         id=ex_id,
@@ -243,7 +249,9 @@ class SsisParser(Parser):
                     )
                 )
 
-        for pc in parent_el.xpath("./*[local-name()='PrecedenceConstraints']/*[local-name()='PrecedenceConstraint']"):
+        for pc in parent_el.xpath(
+            "./*[local-name()='PrecedenceConstraints']/*[local-name()='PrecedenceConstraint']"
+        ):
             up = _attr(pc, "From")
             down = _attr(pc, "To")
             expr = _attr(pc, "Expression") or None
@@ -276,7 +284,9 @@ class SsisParser(Parser):
         output_branch_name: dict[str, str] = {}
 
         for comp in pipeline_exec.xpath(".//pipeline/components/component"):
-            c_id = comp.attrib.get("refId") or comp.attrib.get("id") or comp.attrib.get("name", "comp")
+            c_id = (
+                comp.attrib.get("refId") or comp.attrib.get("id") or comp.attrib.get("name", "comp")
+            )
             c_name = comp.attrib.get("name") or c_id
             class_id = comp.attrib.get("componentClassID") or ""
             props = _prop_dict(comp)
@@ -301,8 +311,14 @@ class SsisParser(Parser):
                     output_branch_name[out_ref] = out_name
 
                 out_props = _prop_dict(out_el)
-                if operator == NodeOperator.ROUTER and not is_err and (out_props.get("FriendlyExpression") or out_props.get("Expression")):
-                    raw_cond = out_props.get("FriendlyExpression") or out_props.get("Expression", "")
+                if (
+                    operator == NodeOperator.ROUTER
+                    and not is_err
+                    and (out_props.get("FriendlyExpression") or out_props.get("Expression"))
+                ):
+                    raw_cond = out_props.get("FriendlyExpression") or out_props.get(
+                        "Expression", ""
+                    )
                     expr_ir = ExpressionConverter.to_neutral(f"{c_id}_{out_name}", raw_cond, "ssis")
                     expressions.append(expr_ir)
                     routes.append({"name": out_name, "condition": expr_ir.neutral_sql or raw_cond})

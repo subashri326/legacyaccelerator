@@ -21,7 +21,11 @@ def list_plugins(
     reg = get_plugin_registry()
     reg.sync_to_db(db)
     db.commit()
-    rows = db.query(PluginRegistryEntry).order_by(PluginRegistryEntry.plugin_type, PluginRegistryEntry.name).all()
+    rows = (
+        db.query(PluginRegistryEntry)
+        .order_by(PluginRegistryEntry.plugin_type, PluginRegistryEntry.name)
+        .all()
+    )
     return [
         {
             "name": r.name,
@@ -45,7 +49,11 @@ def run_golden_tests(
     results = []
     for plugin in reg.list_unique():
         passed, msg = plugin.run_golden_check()
-        row = db.query(PluginRegistryEntry).filter(PluginRegistryEntry.name == plugin.manifest.name).first()
+        row = (
+            db.query(PluginRegistryEntry)
+            .filter(PluginRegistryEntry.name == plugin.manifest.name)
+            .first()
+        )
         if row:
             row.last_golden_status = "passed" if passed else "failed"
         results.append(

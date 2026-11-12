@@ -32,8 +32,14 @@ def get_inventory(
 ) -> dict[str, object]:
     objs = db.query(DbObject).filter(DbObject.project_id == project_id).all()
     jobs = db.query(EtlJob).filter(EtlJob.project_id == project_id).all()
-    scores = {s.object_key: s for s in db.query(ComplexityScore).filter(ComplexityScore.project_id == project_id).all()}
-    statuses = {s.object_key: s for s in db.query(ObjectStatus).filter(ObjectStatus.project_id == project_id).all()}
+    scores = {
+        s.object_key: s
+        for s in db.query(ComplexityScore).filter(ComplexityScore.project_id == project_id).all()
+    }
+    statuses = {
+        s.object_key: s
+        for s in db.query(ObjectStatus).filter(ObjectStatus.project_id == project_id).all()
+    }
     efforts = db.query(EffortEstimate).filter(EffortEstimate.project_id == project_id).all()
     eff_by_key: dict[str, dict[str, float]] = {}
     for e in efforts:
@@ -122,7 +128,11 @@ def get_waves(
                 "name": w.name,
                 "status": w.status,
                 "members": [
-                    {"object_key": m.object_key, "object_kind": m.object_kind, "topo_order": m.topo_order}
+                    {
+                        "object_key": m.object_key,
+                        "object_kind": m.object_kind,
+                        "topo_order": m.topo_order,
+                    }
                     for m in members
                 ],
             }
@@ -137,7 +147,11 @@ def get_neutral_ir(
     _user: CurrentUser = Depends(require_perm(Permission.VIEW_REPORTS)),
     db: Session = Depends(get_db),
 ) -> dict[str, object]:
-    flow = db.query(IrFlow).filter(IrFlow.project_id == project_id, IrFlow.flow_key == flow_key).first()
+    flow = (
+        db.query(IrFlow)
+        .filter(IrFlow.project_id == project_id, IrFlow.flow_key == flow_key)
+        .first()
+    )
     if flow is None:
         raise ValueError(f"IR flow '{flow_key}' not found")
     return {"flow_key": flow.flow_key, "source_tool": flow.source_tool, "ir": flow.ir_payload}

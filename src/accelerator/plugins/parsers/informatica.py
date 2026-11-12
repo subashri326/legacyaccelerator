@@ -54,7 +54,9 @@ class InformaticaParser(Parser):
         pkg_name = (
             workflows[0].attrib.get("NAME")
             if workflows
-            else (mappings[0].attrib.get("NAME") if mappings else artifact_name.removesuffix(".xml"))
+            else (
+                mappings[0].attrib.get("NAME") if mappings else artifact_name.removesuffix(".xml")
+            )
         )
 
         data_flows: list[DataFlowGraphIR] = []
@@ -63,10 +65,7 @@ class InformaticaParser(Parser):
         task_deps: list[TaskDependencyIR] = []
 
         # Collect source/target metadata tables by name
-        table_attrs = {
-            s.attrib.get("NAME", ""): s
-            for s in root.xpath(".//SOURCE | .//TARGET")
-        }
+        table_attrs = {s.attrib.get("NAME", ""): s for s in root.xpath(".//SOURCE | .//TARGET")}
 
         for m_idx, mapping in enumerate(mappings, start=1):
             m_name = mapping.attrib.get("NAME") or f"m_flow_{m_idx}"
@@ -79,7 +78,9 @@ class InformaticaParser(Parser):
 
             for inst in mapping.xpath("./INSTANCE"):
                 inst_name = inst.attrib.get("NAME") or ""
-                inst_type = (inst.attrib.get("TRANSFORMATION_TYPE") or inst.attrib.get("TYPE") or "").lower()
+                inst_type = (
+                    inst.attrib.get("TRANSFORMATION_TYPE") or inst.attrib.get("TYPE") or ""
+                ).lower()
                 t_name = inst.attrib.get("TRANSFORMATION_NAME") or inst_name
                 operator = INFA_TYPE_MAP.get(inst_type, NodeOperator.OPAQUE)
 
@@ -123,13 +124,18 @@ class InformaticaParser(Parser):
                         if f_expr and f_expr != f_name:
                             expressions.append(
                                 ExpressionConverter.to_neutral(
-                                    f"{inst_name}_{f_name}", f_expr, "informatica", target_column=f_name
+                                    f"{inst_name}_{f_name}",
+                                    f_expr,
+                                    "informatica",
+                                    target_column=f_name,
                                 )
                             )
 
                 opaque_item: OpaqueSnippetIR | None = None
                 if operator == NodeOperator.OPAQUE:
-                    snippet = etree.tostring(t_def if t_def is not None else inst, encoding="unicode")[:2000]
+                    snippet = etree.tostring(
+                        t_def if t_def is not None else inst, encoding="unicode"
+                    )[:2000]
                     opaque_item = OpaqueSnippetIR(
                         node_id=inst_name,
                         component_name=inst_name,
@@ -236,5 +242,9 @@ class InformaticaParser(Parser):
   </MAPPING>
 </FOLDER></REPOSITORY></POWERMART>"""
         pkg = self.parse_artifact("golden_infa.xml", sample)
-        ok = len(pkg.data_flows) == 1 and len(pkg.data_flows[0].nodes) == 3 and len(pkg.data_flows[0].edges) == 2
+        ok = (
+            len(pkg.data_flows) == 1
+            and len(pkg.data_flows[0].nodes) == 3
+            and len(pkg.data_flows[0].edges) == 2
+        )
         return ok, "InformaticaParser golden check passed" if ok else "Failed golden check"

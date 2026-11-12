@@ -16,7 +16,19 @@ from accelerator.core.security import mask_row_sample
 from accelerator.ir.models import PackageIR, TableIR
 from accelerator.plugins.interfaces import PluginManifest, ValidationOutcome, Validator
 
-NUMERIC_TYPES = {"INT", "INTEGER", "BIGINT", "SMALLINT", "DECIMAL", "NUMERIC", "FLOAT", "REAL", "DOUBLE", "MONEY", "NUMBER"}
+NUMERIC_TYPES = {
+    "INT",
+    "INTEGER",
+    "BIGINT",
+    "SMALLINT",
+    "DECIMAL",
+    "NUMERIC",
+    "FLOAT",
+    "REAL",
+    "DOUBLE",
+    "MONEY",
+    "NUMBER",
+}
 
 
 def _is_numeric_type(dtype: str) -> bool:
@@ -109,9 +121,11 @@ def _pushed_down_profile(
         pk_cols = [c.name for c in table.columns if c.is_primary_key]
         key_col = pk_cols[0] if pk_cols else (table.columns[0].name if table.columns else None)
         if key_col and kind == "duckdb":
-            col_concat = " || '|' || ".join(f"COALESCE(CAST(\"{c.name}\" AS VARCHAR), '')" for c in table.columns)
+            col_concat = " || '|' || ".join(
+                f"COALESCE(CAST(\"{c.name}\" AS VARCHAR), '')" for c in table.columns
+            )
             q = (
-                f"SELECT ABS(HASH(\"{key_col}\")) % 8 AS bucket, "
+                f'SELECT ABS(HASH("{key_col}")) % 8 AS bucket, '
                 f"COUNT(*) AS cnt, "
                 f"BIT_XOR(HASH({col_concat})) AS bucket_hash "
                 f"FROM {tbl_ident} GROUP BY 1 ORDER BY 1"
@@ -148,14 +162,24 @@ def _l4_masked_row_diff(
     order_col = pk_cols[0] if pk_cols else (table.columns[0].name if table.columns else "1")
     col_names = [c.name for c in table.columns]
 
-    s_rows = conn_s.execute(f'SELECT * FROM {ident_s} ORDER BY "{order_col}" LIMIT {limit * 5}').fetchall()
-    t_rows = conn_t.execute(f'SELECT * FROM {ident_t} ORDER BY "{order_col}" LIMIT {limit * 5}').fetchall()
+    s_rows = conn_s.execute(
+        f'SELECT * FROM {ident_s} ORDER BY "{order_col}" LIMIT {limit * 5}'
+    ).fetchall()
+    t_rows = conn_t.execute(
+        f'SELECT * FROM {ident_t} ORDER BY "{order_col}" LIMIT {limit * 5}'
+    ).fetchall()
 
     s_map = {str(r[0]): _json_safe(dict(zip(col_names, r, strict=False))) for r in s_rows}
     t_map = {str(r[0]): _json_safe(dict(zip(col_names, r, strict=False))) for r in t_rows}
 
-    only_in_source = [mask_row_sample(s_map[k], masked_columns) for k in sorted(s_map.keys() - t_map.keys())[:limit]]
-    only_in_target = [mask_row_sample(t_map[k], masked_columns) for k in sorted(t_map.keys() - s_map.keys())[:limit]]
+    only_in_source = [
+        mask_row_sample(s_map[k], masked_columns)
+        for k in sorted(s_map.keys() - t_map.keys())[:limit]
+    ]
+    only_in_target = [
+        mask_row_sample(t_map[k], masked_columns)
+        for k in sorted(t_map.keys() - s_map.keys())[:limit]
+    ]
     value_mismatches: list[dict[str, Any]] = []
     for k in sorted(s_map.keys() & t_map.keys()):
         if s_map[k] != t_map[k]:
@@ -235,22 +259,44 @@ class SqlPushdownValidator(Validator):
                 for stat in ("null_count", "distinct_count", "min", "max"):
                     if s_col.get(stat) != t_col.get(stat):
                         failed = True
-                        col_diffs.setdefault(col_name, {})[stat] = {"source": s_col.get(stat), "target": t_col.get(stat)}
+                        col_diffs.setdefault(col_name, {})[stat] = {
+                            "source": s_col.get(stat),
+                            "target": t_col.get(stat),
+                        }
             if col_diffs:
                 diffs["column_diffs"] = col_diffs
 
-            if level in ("L3", "L4") and src_metrics["partition_hashes"] != tgt_metrics["partition_hashes"]:
+            if (
+                level in ("L3", "L4")
+                and src_metrics["partition_hashes"] != tgt_metrics["partition_hashes"]
+            ):
                 failed = True
                 diffs["partition_hash_mismatches"] = {
-                    b: {"source": src_metrics["partition_hashes"].get(b), "target": tgt_metrics["partition_hashes"].get(b)}
-                    for b in sorted(set(src_metrics["partition_hashes"]) | set(tgt_metrics["partition_hashes"]))
-                    if src_metrics["partition_hashes"].get(b) != tgt_metrics["partition_hashes"].get(b)
+                    b: {
+                        "source": src_metrics["partition_hashes"].get(b),
+                        "target": tgt_metrics["partition_hashes"].get(b),
+                    }
+                    for b in sorted(
+                        set(src_metrics["partition_hashes"]) | set(tgt_metrics["partition_hashes"])
+                    )
+                    if src_metrics["partition_hashes"].get(b)
+                    != tgt_metrics["partition_hashes"].get(b)
                 }
 
             if level == "L4" or (failed and level in ("L2", "L3")):
-                masked = sorted(set(config.reconciliation.masked_columns) | set(rule.masked_columns))
+                masked = sorted(
+                    set(config.reconciliation.masked_columns) | set(rule.masked_columns)
+                )
                 diffs["l4_diff"] = _l4_masked_row_diff(
-                    kind_s, conn_s, ident_s, kind_t, conn_t, ident_t, table, masked, config.reconciliation.l4_sample_limit
+                    kind_s,
+                    conn_s,
+                    ident_s,
+                    kind_t,
+                    conn_t,
+                    ident_t,
+                    table,
+                    masked,
+                    config.reconciliation.l4_sample_limit,
                 )
 
             verdict = "fail" if failed else ("pass_within_tolerance" if within_tol else "pass")

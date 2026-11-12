@@ -32,7 +32,9 @@ def test_migrations_match_models_sqlite(tmp_path: Path) -> None:
     _assert_migrations_match_models(f"sqlite:///{(tmp_path / 'schema.db').as_posix()}")
 
 
-@pytest.mark.skipif(not os.getenv("L2C_TEST_POSTGRES_URL"), reason="set L2C_TEST_POSTGRES_URL to run")
+@pytest.mark.skipif(
+    not os.getenv("L2C_TEST_POSTGRES_URL"), reason="set L2C_TEST_POSTGRES_URL to run"
+)
 def test_migrations_match_models_postgres() -> None:
     _assert_migrations_match_models(os.environ["L2C_TEST_POSTGRES_URL"])
 
@@ -44,11 +46,15 @@ def test_etl_accepts_one_tool_or_a_list() -> None:
         {**base, "source": {"database": "sqlserver", "etl": ["ssis", "informatica", "datastage"]}}
     )
     assert one.source.etl_tools == ["ssis"] and one.source.etl == "ssis"
-    assert many.source.etl_tools == ["ssis", "informatica", "datastage"] and many.source.etl == "ssis"
+    assert (
+        many.source.etl_tools == ["ssis", "informatica", "datastage"] and many.source.etl == "ssis"
+    )
 
 
 def test_project_stays_comparing_until_target_chosen(isolated_env: Path) -> None:
-    undecided = "client: acme\nproject: dw\nsource:\n  database: sqlserver\n  etl: [ssis, informatica]\n"
+    undecided = (
+        "client: acme\nproject: dw\nsource:\n  database: sqlserver\n  etl: [ssis, informatica]\n"
+    )
     cfg, _ = parse_client_config_yaml(undecided)
     with pytest.raises(ConfigError):
         cfg.require_target()
