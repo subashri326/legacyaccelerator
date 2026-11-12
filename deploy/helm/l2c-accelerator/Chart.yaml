@@ -1,0 +1,6 @@
+apiVersion: v2
+name: l2c-accelerator
+description: Legacy-to-Cloud Data Modernization Accelerator (client-hosted Kubernetes deployment)
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

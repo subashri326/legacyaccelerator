@@ -1,0 +1,58 @@
+client: acme_retail
+project: acme_retail_dw
+environment: dev
+
+source:
+  database: sqlserver
+  etl: ssis
+  connection: vault://acme/sqlserver-ro
+  catalog_bundle_path: examples/acme_retail/legacy_ddl.sql
+  usage_log_path: examples/acme_retail/usage_log.csv
+  etl_export_paths:
+    - examples/acme_retail/ssis
+    - examples/acme_retail/informatica
+    - examples/acme_retail/datastage
+
+target:
+  platform: snowflake
+  output: dbt
+  connection: vault://acme/snowflake-deploy
+  database: ACME_CLOUD_DW
+  warehouse: COMPUTE_WH
+
+naming:
+  schema: "{layer}_{source_db}"
+  table_case: upper
+  column_case: lower
+  layer_default: curated
+
+type_overrides:
+  - source: DATETIME2
+    target: TIMESTAMP_NTZ
+
+custom_rules:
+  - match: "component_type == 'ScriptTask'"
+    action: flag_manual
+    reason: "Custom .NET ScriptTask requires manual or AI-assisted refactoring"
+
+reconciliation:
+  default_level: L2
+  numeric_tolerance: 0.01
+  l4_retention_days: 7
+  masked_columns:
+    - ssn
+    - email
+  overrides:
+    - table: finance.gl_entries
+      level: L3
+      numeric_tolerance: 0.0
+
+movement:
+  mover: parquet
+  partition_size_rows: 50
+  parallelism: 2
+  watermark_columns:
+    dbo.orders: updated_at
+
+ai_assist:
+  enabled: true

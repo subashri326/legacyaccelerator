@@ -1,0 +1,38 @@
+BEGIN DSJOB
+   Identifier "ds_product_dim"
+   BEGIN DSRECORD
+      Identifier "V0S1"
+      OLEType "CCustomStage"
+      Name "Src_Products"
+      StageType "ODBCConnectorPX"
+      TableName "dbo.products"
+      OutputPins "V0S1P1"
+   END DSRECORD
+   BEGIN DSRECORD
+      Identifier "V0S2"
+      OLEType "CTransformerStage"
+      Name "Xfm_Standardize_Product"
+      StageType "CTransformerStage"
+      InputPins "V0S2P1"
+      OutputPins "V0S2P2"
+      Derivation "NullToValue(product_name, 'UNKNOWN')"
+   END DSRECORD
+   BEGIN DSRECORD
+      Identifier "V0S3"
+      OLEType "CCustomStage"
+      Name "Tgt_Product_Dim"
+      StageType "ODBCConnectorPX"
+      TableName "dim_products"
+      InputPins "V0S3P1"
+   END DSRECORD
+   BEGIN DSRECORD
+      Identifier "V0S1P1"
+      OLEType "CCustomOutput"
+      Partner "V0S2P1"
+   END DSRECORD
+   BEGIN DSRECORD
+      Identifier "V0S2P2"
+      OLEType "CCustomOutput"
+      Partner "V0S3P1"
+   END DSRECORD
+END DSJOB
