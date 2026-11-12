@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import duckdb
+from alembic import command
 from alembic.config import Config
 
 from accelerator.config.client_config import ClientConfig, SourceConfig, TargetConfig
@@ -17,7 +18,6 @@ from accelerator.engines.discover import DiscoverEngine
 from accelerator.engines.move import MoveEngine
 from accelerator.ir.models import PackageIR
 from accelerator.plugins.registry import build_default_registry
-from alembic import command
 
 
 def test_sql_parsers_and_vendor_wrappers() -> None:
