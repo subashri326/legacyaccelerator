@@ -105,9 +105,12 @@ class AssessEngine:
 
             for obj in db_objects:
                 if obj.object_type in ("VIEW", "PROCEDURE") and obj.definition_sql:
-                    dialect_tool = {"sqlserver": "tsql", "oracle": "plsql", "teradata": "bteq"}.get(
-                        cfg.source.database, "tsql"
-                    )
+                    dialect_tool = {
+                        "sqlserver": "tsql",
+                        "oracle": "plsql",
+                        "teradata": "bteq",
+                        "postgres": "postgres",
+                    }.get(cfg.source.database, "tsql")
                     parser = self.registry.get_parser(dialect_tool)
                     pkg = parser.parse_artifact(obj.fqn, obj.definition_sql.encode("utf-8"))
                     pkg.id = obj.fqn

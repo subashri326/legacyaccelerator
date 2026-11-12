@@ -49,3 +49,32 @@ helm upgrade --install l2c deploy/helm/l2c-accelerator
 ```powershell
 .venv\Scripts\pytest
 ```
+
+## Connecting to real systems
+
+Connections are stored in the secrets vault and referenced from the client config
+(`source.connection` / `target.connection`, e.g. `vault://acme/sqlserver-ro`). The secret is a
+SQLAlchemy-style URI:
+
+| Engine | URI | Install |
+|---|---|---|
+| SQL Server | `mssql+pyodbc://user:pass@host/db?driver=ODBC+Driver+18+for+SQL+Server` | `pip install ".[sqlserver]"` + Microsoft ODBC Driver 18 |
+| PostgreSQL | `postgresql+psycopg2://user:pass@host/db` | included |
+| Snowflake | `snowflake://user:pass@account/database/schema?warehouse=WH&role=ROLE` | `pip install ".[snowflake]"` |
+| Databricks | `databricks://token:<pat>@<host>?http_path=<warehouse path>&catalog=<c>&schema=<s>` | `pip install ".[databricks]"` |
+| Fabric Warehouse | `mssql+pyodbc://...@<workspace>.datawarehouse.fabric.microsoft.com/<warehouse>?driver=ODBC+Driver+18+for+SQL+Server&authentication=ActiveDirectoryServicePrincipal` | `pip install ".[sqlserver]"` |
+| DuckDB (local stand-in) | `duckdb:///path/file.duckdb` | included |
+
+`pip install ".[connectors]"` installs every driver. The backend Docker image includes the ODBC driver.
+
+**How data moves:** Move needs Convert to have run first. The converted table definition
+creates each target table. Rows are read in primary-key order, one chunk at a time (chunk size
+`movement.partition_size_rows`). Each chunk is saved as soon as it is written, so a failed load
+can continue with `l2c move <project> --object-key <table> --resume-load-run-id <run>`.
+Incremental loads (`--mode incremental`) need `movement.watermark_columns` for the table and a
+single-column primary key. Changed rows replace their old versions by key. Rows deleted at the
+source are not detected.
+
+**What is tested where:** the automated tests run the full flow against a real PostgreSQL
+server and against DuckDB. Snowflake, Databricks, Fabric and SQL Server use the same code path
+through their SQLAlchemy dialects, but need your accounts to test end to end.

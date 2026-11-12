@@ -32,9 +32,12 @@ class AirbyteMover(Mover):
         config: ClientConfig,
         mode: str = "bulk",
         watermark_value: str | None = None,
-        existing_completed_partitions: set[int] | None = None,
+        resume: bool = False,
+        start_partition_index: int = 0,
         staging_writer: Callable[[int, bytes], str] | None = None,
         target_ddl_sql: str | None = None,
+        target_table: TableIR | None = None,
+        on_partition: Callable[[PartitionResult], None] | None = None,
     ) -> MoveOutcome:
         conn_id = config.movement.airbyte_connection_id
         api_base = resolve_connection_uri(target_uri) if target_uri.startswith("http") else ""

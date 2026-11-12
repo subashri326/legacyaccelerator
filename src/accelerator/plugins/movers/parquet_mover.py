@@ -1,104 +1,136 @@
-"""Built-in parallel partitioned Parquet mover with watermark incremental support and checkpoints."""
+"""Built-in mover: source -> Parquet staging -> target, chunk by chunk, restartable.
+
+How a table is moved:
+
+1. The generated target DDL (from Convert) is run on the target if the table doesn't exist yet,
+   so the target gets the converted names and types. Without it the load refuses to start.
+2. Rows are read in key order, one chunk at a time (``WHERE key > last ORDER BY key LIMIT n``).
+   Each chunk is staged as Parquet (evidence + cloud COPY INTO), written to the target in one
+   transaction, and reported through ``on_partition`` so the engine can checkpoint it at once.
+3. Bulk: the target is emptied first, unless resuming - then loading continues after the
+   highest key already on the target, so nothing is loaded twice.
+4. Incremental: rows changed since the last watermark go to a staging table, then replace their
+   old versions by key in one transaction (delete + insert). Needs a watermark column and a
+   single-column primary key; without them the load refuses rather than duplicating rows.
+   Rows deleted at the source are not detected by watermark loads.
+"""
 
 from __future__ import annotations
 
 import hashlib
-import io
-import sqlite3
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
 from typing import Any
 
-import duckdb
-import pandas as pd
 import pyarrow as pa
-import pyarrow.parquet as pq
+import pyarrow.compute as pc
+from sqlglot import exp
 
 from accelerator.config.client_config import ClientConfig
-from accelerator.core.secrets import resolve_connection_uri
+from accelerator.connectors import Connector, open_connector
+from accelerator.connectors.base import arrow_to_parquet_bytes
+from accelerator.core.exceptions import ConfigError
+from accelerator.ir.expressions import DIALECT_MAP
 from accelerator.ir.models import TableIR
 from accelerator.plugins.interfaces import MoveOutcome, Mover, PartitionResult, PluginManifest
 
-
-def _connect_local_db(uri: str) -> tuple[str, Any]:
-    if uri.startswith("duckdb:///"):
-        path = uri.removeprefix("duckdb:///")
-        Path(path).parent.mkdir(parents=True, exist_ok=True)
-        return "duckdb", duckdb.connect(path)
-    if uri.startswith("sqlite:///"):
-        path = uri.removeprefix("sqlite:///")
-        Path(path).parent.mkdir(parents=True, exist_ok=True)
-        return "sqlite", sqlite3.connect(path)
-    raise ValueError(f"Unsupported local connection URI: {uri}")
-
-
-def _qualified_table(kind: str, table: TableIR) -> str:
-    if kind == "duckdb":
-        return f'"{table.schema_name}"."{table.name}"'
-    return f'"{table.schema_name}.{table.name}"'
-
-
-def _sqlite_or_duck_exists(kind: str, conn: Any, table: TableIR) -> bool:
-    if kind == "duckdb":
-        rows = conn.execute(
-            "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = ? AND table_name = ?",
-            [table.schema_name, table.name],
-        ).fetchall()
-        return bool(rows and rows[0][0] > 0)
-    rows = conn.execute(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name = ?",
-        [f"{table.schema_name}.{table.name}"],
-    ).fetchall()
-    if rows and rows[0][0] > 0:
-        return True
-    rows2 = conn.execute(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name = ?",
-        [table.name],
-    ).fetchall()
-    return bool(rows2 and rows2[0][0] > 0)
+STAGING_SUFFIX = "__L2C_STG"
 
 
 def build_native_bulk_load_sql(
-    platform: str,
-    target_schema: str,
-    target_table: str,
-    parquet_uri: str,
+    platform: str, target_schema: str, target_table: str, parquet_uri: str
 ) -> str:
-    """Emit platform-native bulk COPY/Auto Loader statement for Snowflake, Databricks, or Fabric."""
+    """Platform-native bulk load of one staged Parquet file."""
     fqn = f"{target_schema}.{target_table}"
     if platform == "snowflake":
         return (
-            f"COPY INTO {fqn}\n"
-            f"FROM '{parquet_uri}'\n"
-            f"FILE_FORMAT = (TYPE = PARQUET)\n"
-            f"MATCH_BY_COLUMN_NAME = CASE_INSENSITIVE;"
+            f"COPY INTO {fqn}\nFROM '{parquet_uri}'\nFILE_FORMAT = (TYPE = PARQUET)\n"
+            "MATCH_BY_COLUMN_NAME = CASE_INSENSITIVE;"
         )
     if platform == "databricks":
-        return (
-            f"COPY INTO {fqn}\n"
-            f"FROM '{parquet_uri}'\n"
-            f"FILEFORMAT = PARQUET\n"
-            f"COPY_OPTIONS ('mergeSchema' = 'true');"
-        )
+        return f"COPY INTO {fqn}\nFROM '{parquet_uri}'\nFILEFORMAT = PARQUET\nCOPY_OPTIONS ('mergeSchema' = 'false');"
     return f"COPY INTO {fqn}\nFROM '{parquet_uri}'\nWITH (FILE_TYPE = 'PARQUET');"
 
 
+def _is_cloud_uri(uri: str | None) -> bool:
+    return bool(uri) and uri.startswith(("s3://", "abfs://", "abfss://", "gs://"))  # type: ignore[union-attr]
+
+
+def _single_key(table: TableIR) -> str | None:
+    pks = [c.name for c in table.columns if c.is_primary_key]
+    return pks[0] if len(pks) == 1 else None
+
+
+def _page_query(
+    src: Connector,
+    table: TableIR,
+    key: str | None,
+    after_key: Any,
+    wm_col: str | None,
+    wm_value: Any,
+    size: int,
+    offset: int,
+) -> str:
+    cols = [exp.column(src.quote(c.name)) for c in table.columns]
+    q = exp.select(*cols).from_(
+        exp.table_(
+            src.quote(table.name), db=src.quote(table.schema_name) if table.schema_name else None
+        )
+    )
+    conds: list[exp.Expression] = []
+    if wm_col and wm_value is not None:
+        conds.append(exp.column(src.quote(wm_col)) > exp.convert(wm_value))
+    if key and after_key is not None:
+        conds.append(exp.column(src.quote(key)) > exp.convert(after_key))
+    if conds:
+        q = q.where(exp.and_(*conds))
+    order = [exp.column(src.quote(key))] if key else cols
+    q = q.order_by(*order).limit(size)
+    if not key and offset:
+        q = q.offset(offset)
+    return src.render(q)
+
+
+def _ensure_target_table(tgt: Connector, tt: TableIR, ddl_sql: str | None, platform: str) -> bool:
+    """Create schema + table from the converted DDL if missing. Returns True if DDL was executed."""
+    tgt.create_schema(tt.schema_name)
+    if tgt.table_exists(tt.schema_name, tt.name):
+        return False
+    if not ddl_sql:
+        raise ConfigError(
+            f"No converted DDL for {tt.schema_name}.{tt.name}: run Convert before Move so the "
+            "target table is created with the converted names and types."
+        )
+    platform_dialect = DIALECT_MAP.get(platform, platform)
+    for stmt in tgt.transpile(ddl_sql, read=platform_dialect):
+        if stmt.lstrip().upper().startswith("CREATE SCHEMA"):
+            continue  # handled by create_schema (syntax differs per engine)
+        tgt.execute(stmt)
+    return True
+
+
 class ParquetMover(Mover):
-    """Parallel partitioned source->Parquet->target mover with partition-level checkpoints."""
+    """Chunked, checkpointed source -> Parquet -> target mover for any supported engine."""
 
     manifest = PluginManifest(
         plugin_type="Mover",
         name="parquet_mover",
-        version="0.1.0",
+        version="0.2.0",
         supported_versions=[
-            "Snowflake COPY INTO",
-            "Databricks COPY/AutoLoader",
-            "Fabric COPY",
-            "DuckDB/SQLite",
+            "SQL Server",
+            "PostgreSQL",
+            "Snowflake",
+            "Databricks",
+            "Fabric",
+            "DuckDB",
+            "SQLite",
         ],
-        capabilities={"bulk": True, "incremental_watermark": True, "checkpointing": True},
-        description="Extracts partitioned chunks to Parquet in cloud/local storage and loads targets idempotently.",
+        capabilities={
+            "bulk": True,
+            "incremental_merge": True,
+            "checkpointing": True,
+            "resume": True,
+        },
+        description="Keyset-paged extraction, Parquet staging, per-chunk checkpoints, incremental upserts.",
     )
 
     def load_table(
@@ -109,186 +141,150 @@ class ParquetMover(Mover):
         config: ClientConfig,
         mode: str = "bulk",
         watermark_value: str | None = None,
-        existing_completed_partitions: set[int] | None = None,
+        resume: bool = False,
+        start_partition_index: int = 0,
         staging_writer: Callable[[int, bytes], str] | None = None,
         target_ddl_sql: str | None = None,
         target_table: TableIR | None = None,
+        on_partition: Callable[[PartitionResult], None] | None = None,
     ) -> MoveOutcome:
         tt = target_table or table
-        src_resolved = resolve_connection_uri(source_uri)
-        tgt_resolved = resolve_connection_uri(target_uri)
-        completed_set = existing_completed_partitions or set()
+        if len(tt.columns) != len(table.columns):
+            raise ConfigError("Target table must have the same columns as the source table")
+        platform = config.require_target()
+        key = _single_key(table)
+        key_target = tt.columns[[c.name for c in table.columns].index(key)].name if key else None
+        wm_col = config.movement.watermark_columns.get(
+            table.fqn
+        ) or config.movement.watermark_columns.get(f"{table.schema_name}.{table.name}")
+        if mode == "incremental" and (not wm_col or not key):
+            raise ConfigError(
+                f"Incremental load of {table.fqn} needs a watermark column (movement.watermark_columns) "
+                "and a single-column primary key. Use a bulk load instead."
+            )
+        size = max(1, config.movement.partition_size_rows)
 
-        src_kind, src_conn = _connect_local_db(src_resolved)
-        try:
-            src_tbl_sql = _qualified_table(src_kind, table)
-            if src_kind == "sqlite" and not _sqlite_or_duck_exists("sqlite", src_conn, table):
-                src_tbl_sql = f'"{table.name}"'
-
-            wm_col = config.movement.watermark_columns.get(
-                table.fqn
-            ) or config.movement.watermark_columns.get(f"{table.schema_name}.{table.name}")
-            where_clause = ""
-            if mode == "incremental" and wm_col and watermark_value:
-                where_clause = f" WHERE {wm_col} > '{watermark_value}'"
-
-            count_rows = src_conn.execute(
-                f"SELECT COUNT(*) FROM {src_tbl_sql}{where_clause}"
-            ).fetchall()
-            total_rows = int(count_rows[0][0]) if count_rows else 0
-            part_size = max(1, config.movement.partition_size_rows)
-            num_parts = max(1, (total_rows + part_size - 1) // part_size)
-
-            # Extract partitions to Parquet bytes (parallel-safe via thread-local read or chunk fetch)
-            pk_cols = [c.name for c in table.columns if c.is_primary_key]
-            order_col = pk_cols[0] if pk_cols else (table.columns[0].name if table.columns else "1")
-
-            extracted_chunks: list[tuple[int, str, int, bytes, str]] = []
-            new_watermark: str | None = watermark_value
-
-            for p_idx in range(num_parts):
-                if p_idx in completed_set:
-                    continue
-                offset = p_idx * part_size
-                pred = f"OFFSET {offset} LIMIT {part_size}"
-                if where_clause:
-                    pred = f"{where_clause.strip()} ({pred})"
-                query = f"SELECT * FROM {src_tbl_sql}{where_clause} ORDER BY {order_col} LIMIT {part_size} OFFSET {offset}"
-                if src_kind == "sqlite":
-                    df = pd.read_sql_query(query, src_conn)
-                    arrow_tbl = pa.Table.from_pandas(df, preserve_index=False)
+        with open_connector(source_uri, read_only=True) as src, open_connector(target_uri) as tgt:
+            ddl_executed = _ensure_target_table(tgt, tt, target_ddl_sql, platform)
+            write_name = tt.name
+            after_key: Any = None
+            if mode == "bulk":
+                if resume and key_target:
+                    rows = tgt.query(
+                        f"SELECT MAX({tgt.quote(key_target)}) FROM {tgt.qualified(tt.schema_name, tt.name)}"
+                    )
+                    after_key = rows[0][0] if rows else None
                 else:
-                    # DuckDB SQL -> Arrow preserves native DECIMAL, DATE, and TIMESTAMP types losslessly.
-                    arrow_tbl = src_conn.sql(query).to_arrow_table()
+                    tgt.truncate(tt.schema_name, tt.name)
+                    start_partition_index = 0
+            else:
+                write_name = f"{tt.name}{STAGING_SUFFIX}"
+                tgt.drop_table(tt.schema_name, write_name)
+                tgt.create_empty_like(tt.schema_name, write_name, tt.schema_name, tt.name)
+                start_partition_index = 0
 
-                if wm_col and wm_col in arrow_tbl.column_names and arrow_tbl.num_rows > 0:
-                    wm_vals = [str(v) for v in arrow_tbl[wm_col].to_pylist() if v is not None]
-                    if wm_vals:
-                        max_wm = max(wm_vals)
-                        if new_watermark is None or max_wm > new_watermark:
-                            new_watermark = max_wm
-
-                buf = io.BytesIO()
-                pq.write_table(arrow_tbl, buf)
-                pq_bytes = buf.getvalue()
+            partitions: list[PartitionResult] = []
+            native_cmds: list[str] = []
+            total = 0
+            new_wm: Any = watermark_value
+            idx = start_partition_index
+            offset = 0
+            target_names = [c.name for c in tt.columns]
+            while True:
+                sql = _page_query(
+                    src,
+                    table,
+                    key,
+                    after_key,
+                    wm_col if mode == "incremental" else None,
+                    watermark_value if mode == "incremental" else None,
+                    size,
+                    offset,
+                )
+                batch = src.fetch_arrow(sql)
+                if batch.num_rows == 0:
+                    break
+                batch = batch.rename_columns(target_names)
+                pq_bytes = arrow_to_parquet_bytes(batch)
                 checksum = hashlib.sha256(pq_bytes).hexdigest()
-                extracted_chunks.append((p_idx, pred, arrow_tbl.num_rows, pq_bytes, checksum))
-        finally:
-            src_conn.close()
-
-        # Stage Parquet chunks (can run concurrently for large estates)
-        staged_uris: dict[int, str] = {}
-        if staging_writer is not None and extracted_chunks:
-            with ThreadPoolExecutor(
-                max_workers=min(config.movement.parallelism, len(extracted_chunks))
-            ) as pool:
-                futs = {
-                    pool.submit(staging_writer, p_idx, pq_bytes): p_idx
-                    for p_idx, _, _, pq_bytes, _ in extracted_chunks
-                }
-                for fut, p_idx in futs.items():
-                    staged_uris[p_idx] = fut.result()
-
-        # Load into target database (live DuckDB/SQLite OR emit native COPY SQL)
-        partition_results: list[PartitionResult] = []
-        native_copy_statements: list[str] = []
-        total_loaded = 0
-
-        if tgt_resolved.startswith(("duckdb:///", "sqlite:///")):
-            tgt_kind, tgt_conn = _connect_local_db(tgt_resolved)
-            try:
-                if tgt_kind == "duckdb":
-                    tgt_conn.execute(f'CREATE SCHEMA IF NOT EXISTS "{tt.schema_name}"')
-                tgt_tbl_sql = _qualified_table(tgt_kind, tt)
-
-                if mode == "bulk" and not completed_set:
-                    tgt_conn.execute(f"DROP TABLE IF EXISTS {tgt_tbl_sql}")
-
-                for p_idx, pred, chunk_rows, pq_bytes, checksum in extracted_chunks:
-                    p_uri = staged_uris.get(p_idx, f"memory://part_{p_idx}.parquet")
-                    chunk_arrow = pq.read_table(io.BytesIO(pq_bytes))
-                    if len(tt.columns) == chunk_arrow.num_columns:  # apply target column naming
-                        chunk_arrow = chunk_arrow.rename_columns([c.name for c in tt.columns])
-                    if tgt_kind == "duckdb":
-                        tbl_exists = _sqlite_or_duck_exists("duckdb", tgt_conn, tt)
-                        tgt_conn.register("_l2c_chunk_arrow", chunk_arrow)
-                        if not tbl_exists:
-                            tgt_conn.execute(
-                                f"CREATE TABLE {tgt_tbl_sql} AS SELECT * FROM _l2c_chunk_arrow"
-                            )
-                        else:
-                            tgt_conn.execute(
-                                f"INSERT INTO {tgt_tbl_sql} SELECT * FROM _l2c_chunk_arrow"
-                            )
-                        tgt_conn.unregister("_l2c_chunk_arrow")
-                    else:
-                        tbl_name_sqlite = f"{tt.schema_name}.{tt.name}"
-                        if_exists = (
-                            "replace"
-                            if (mode == "bulk" and p_idx == 0 and not completed_set)
-                            else "append"
-                        )
-                        chunk_arrow.to_pandas().to_sql(
-                            tbl_name_sqlite, tgt_conn, if_exists=if_exists, index=False
-                        )
-
-                    rows_n = chunk_rows
-                    total_loaded += rows_n
-                    partition_results.append(
-                        PartitionResult(
-                            partition_index=p_idx,
-                            range_predicate=pred,
-                            parquet_uri=p_uri,
-                            rows_extracted=rows_n,
-                            rows_loaded=rows_n,
-                            checksum=checksum,
-                            status="completed",
-                        )
+                uri = staging_writer(idx, pq_bytes) if staging_writer else None
+                if _is_cloud_uri(uri) and tgt.kind in ("databricks", "fabric") and mode == "bulk":
+                    cmd = build_native_bulk_load_sql(
+                        platform, tt.schema_name, write_name, uri or ""
                     )
-                    native_copy_statements.append(
-                        build_native_bulk_load_sql(
-                            config.target.platform, tt.schema_name, tt.name, p_uri
-                        )
+                    tgt.execute(cmd.rstrip(";"))
+                    written = batch.num_rows
+                else:
+                    written = tgt.write_arrow(batch, tt.schema_name, write_name)
+                if uri:
+                    native_cmds.append(
+                        build_native_bulk_load_sql(platform, tt.schema_name, tt.name, uri)
                     )
-                if tgt_kind == "sqlite":
-                    tgt_conn.commit()
-            finally:
-                tgt_conn.close()
-        else:
-            for p_idx, pred, chunk_rows, _pq_bytes, checksum in extracted_chunks:
-                p_uri = staged_uris.get(p_idx, f"staged://{tt.name}/part_{p_idx}.parquet")
-                rows_n = chunk_rows
-                total_loaded += rows_n
-                native_copy_statements.append(
-                    build_native_bulk_load_sql(
-                        config.target.platform, tt.schema_name, tt.name, p_uri
+
+                if key:
+                    prev = after_key
+                    after_key = batch.column(key_target)[-1].as_py()
+                    predicate = (
+                        f"{key} > {prev!r} AND {key} <= {after_key!r}"
+                        if prev is not None
+                        else f"{key} <= {after_key!r}"
                     )
+                else:
+                    predicate = f"rows {offset + 1}-{offset + batch.num_rows} (no single-column key: offset paging)"
+                    offset += batch.num_rows
+                if wm_col:
+                    wm_target = (
+                        target_names[[c.name for c in table.columns].index(wm_col)]
+                        if wm_col in [c.name for c in table.columns]
+                        else None
+                    )
+                    if wm_target:
+                        batch_max = pc.max(batch.column(wm_target)).as_py()
+                        if batch_max is not None and (
+                            new_wm is None or str(batch_max) > str(new_wm)
+                        ):
+                            new_wm = batch_max
+                part = PartitionResult(
+                    partition_index=idx,
+                    range_predicate=predicate,
+                    parquet_uri=uri or "",
+                    rows_extracted=batch.num_rows,
+                    rows_loaded=written,
+                    checksum=checksum,
+                    status="completed",
                 )
-                partition_results.append(
-                    PartitionResult(
-                        partition_index=p_idx,
-                        range_predicate=pred,
-                        parquet_uri=p_uri,
-                        rows_extracted=rows_n,
-                        rows_loaded=rows_n,
-                        checksum=checksum,
-                        status="completed",
-                    )
+                partitions.append(part)
+                if on_partition:
+                    on_partition(part)
+                total += written
+                idx += 1
+                if batch.num_rows < size:
+                    break
+
+            if mode == "incremental":
+                t = tgt.qualified(tt.schema_name, tt.name)
+                s = tgt.qualified(tt.schema_name, write_name)
+                k = tgt.quote(key_target or "")
+                tgt.execute_in_transaction(
+                    [
+                        f"DELETE FROM {t} WHERE EXISTS (SELECT 1 FROM {s} WHERE {s}.{k} = {t}.{k})",
+                        f"INSERT INTO {t} SELECT * FROM {s}",
+                    ]
                 )
+                tgt.drop_table(tt.schema_name, write_name)
 
         return MoveOutcome(
             object_key=table.fqn,
-            rows_loaded=total_loaded,
+            rows_loaded=total,
             mode=mode,
-            watermark_value=new_watermark,
-            partitions=partition_results,
+            watermark_value=str(new_wm) if new_wm is not None else None,
+            partitions=partitions,
             evidence={
-                "native_bulk_commands": native_copy_statements,
                 "target_table": f"{tt.schema_name}.{tt.name}",
-                # Local stand-in targets create the table from the data; the generated DDL is
-                # executed on real targets by the target connector.
-                "target_ddl_executed": False,
-                "skipped_checkpointed_partitions": sorted(completed_set),
+                "target_ddl_executed": ddl_executed,
+                "paging": f"keyset on {key}" if key else "offset (no single-column primary key)",
+                "resumed_after_key": None if not resume else str(after_key),
+                "native_bulk_commands": native_cmds,
             },
         )
 
@@ -298,3 +294,6 @@ class ParquetMover(Mover):
         )
         ok = "COPY INTO CURATED.ORDERS" in sql and "FILE_FORMAT = (TYPE = PARQUET)" in sql
         return ok, "ParquetMover golden check passed" if ok else "Failed golden check"
+
+
+__all__ = ["ParquetMover", "build_native_bulk_load_sql", "pa"]

@@ -1,220 +1,221 @@
-"""Pushed-down L1-L4 and Job-Level SQL reconciliation engine (Section 4.5)."""
+"""Reconciliation: compare a source table with its migrated copy, inside each engine.
+
+Every check is an aggregate query run where the data lives (no rows are copied out, except a
+small masked sample when a check fails or L4 is asked for). Queries are built once and rendered
+in each engine's own SQL dialect, so source and target can be different engines
+(e.g. SQL Server vs Snowflake).
+
+Levels
+* L1  row count
+* L2  per column: sum (numbers), min, max, null count, distinct count
+* L3  L2 plus per-bucket fingerprints (rows split into 16 buckets by an integer key): count,
+      numeric sums and string lengths per bucket - pinpoints where a difference is
+* L4  L3 plus a masked row-level diff of a bounded sample
+"""
 
 from __future__ import annotations
 
-import hashlib
-import sqlite3
-from datetime import date, datetime
+import math
+from datetime import date, datetime, time
 from decimal import Decimal
 from typing import Any
 
-import duckdb
+from sqlglot import exp
 
 from accelerator.config.client_config import ClientConfig, ReconOverride
-from accelerator.core.secrets import resolve_connection_uri
+from accelerator.connectors import Connector, open_connector
 from accelerator.core.security import mask_row_sample
 from accelerator.ir.models import PackageIR, TableIR
 from accelerator.plugins.interfaces import PluginManifest, ValidationOutcome, Validator
 
+BUCKETS = 16
 NUMERIC_TYPES = {
     "INT",
     "INTEGER",
     "BIGINT",
     "SMALLINT",
+    "TINYINT",
     "DECIMAL",
     "NUMERIC",
     "FLOAT",
     "REAL",
     "DOUBLE",
     "MONEY",
+    "SMALLMONEY",
     "NUMBER",
+    "BYTEINT",
+}
+INTEGER_TYPES = {"INT", "INTEGER", "BIGINT", "SMALLINT", "TINYINT", "BYTEINT"}
+BOOL_TYPES = {"BIT", "BOOLEAN", "BOOL"}
+STRING_TYPES = {
+    "VARCHAR",
+    "NVARCHAR",
+    "CHAR",
+    "NCHAR",
+    "STRING",
+    "VARCHAR2",
+    "NVARCHAR2",
+    "CHARACTER",
+}
+LOB_TYPES = {
+    "TEXT",
+    "NTEXT",
+    "IMAGE",
+    "XML",
+    "CLOB",
+    "BLOB",
+    "VARBINARY",
+    "BINARY",
+    "GEOGRAPHY",
+    "GEOMETRY",
 }
 
 
-def _is_numeric_type(dtype: str) -> bool:
-    token = dtype.split("(")[0].strip().upper()
-    return token in NUMERIC_TYPES
+def _base(dtype: str) -> str:
+    return dtype.split("(")[0].strip().upper()
 
 
-def _json_safe(value: Any) -> Any:
-    """Normalize DB driver types (Decimal, date/datetime, bytes) for deterministic compare and JSON storage."""
-    if value is None or isinstance(value, (bool, int, float, str)):
-        return value
-    if isinstance(value, Decimal):
-        return float(value)
-    if isinstance(value, (datetime, date)):
-        return value.isoformat()
-    if isinstance(value, (bytes, bytearray)):
-        return value.hex()
-    if isinstance(value, dict):
-        return {str(k): _json_safe(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_json_safe(v) for v in value]
-    if isinstance(value, set):
-        return [_json_safe(v) for v in sorted(value, key=str)]
-    return str(value)
+def _kind(dtype: str) -> str:
+    b = _base(dtype)
+    if b in BOOL_TYPES:
+        return "bool"
+    if b in NUMERIC_TYPES:
+        return "number"
+    if b in LOB_TYPES or "(MAX)" in dtype.upper():
+        return "lob"
+    if b in STRING_TYPES:
+        return "string"
+    return "other"  # dates, times, uuids...
 
 
-def _open_conn(uri: str) -> tuple[str, Any]:
-    if uri.startswith("duckdb:///"):
-        return "duckdb", duckdb.connect(uri.removeprefix("duckdb:///"), read_only=True)
-    if uri.startswith("sqlite:///"):
-        return "sqlite", sqlite3.connect(f"file:{uri.removeprefix('sqlite:///')}?mode=ro", uri=True)
-    raise ValueError(f"Unsupported database URI for validator: {uri}")
+def _norm(v: Any) -> Any:
+    """Make values from different drivers comparable."""
+    if v is None or isinstance(v, bool):
+        return v
+    if isinstance(v, (int, float, Decimal)):
+        return float(v)
+    if isinstance(v, datetime):
+        return v.replace(tzinfo=None).isoformat(sep=" ")
+    if isinstance(v, (date, time)):
+        return v.isoformat()
+    if isinstance(v, (bytes, bytearray, memoryview)):
+        return bytes(v).hex()
+    if isinstance(v, str):
+        return v.rstrip()  # CHAR padding differs between engines
+    return str(v)
 
 
-def _table_ident(kind: str, conn: Any, table: TableIR) -> str:
-    if kind == "duckdb":
-        return f'"{table.schema_name}"."{table.name}"'
-    row = conn.execute(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name = ?",
-        [f"{table.schema_name}.{table.name}"],
-    ).fetchone()
-    if row and row[0] > 0:
-        return f'"{table.schema_name}.{table.name}"'
-    return f'"{table.name}"'
+def _close(a: float | None, b: float | None, tol: float) -> tuple[bool, float]:
+    if a is None or b is None:
+        return a is b, 0.0
+    delta = abs(a - b)
+    # Allow tiny float noise from different engines' summation order.
+    return delta <= tol + 1e-9 * max(1.0, abs(a), abs(b)), delta
 
 
-def _pushed_down_profile(
-    kind: str,
-    conn: Any,
-    tbl_ident: str,
-    table: TableIR,
-    level: str,
+def _profile(
+    conn: Connector, tbl: TableIR, kinds: list[str], level: str, key: str | None
 ) -> dict[str, Any]:
-    """Run L1/L2/L3 aggregate & hash queries inside the DB engine without pulling data rows."""
-    row_cnt = int(conn.execute(f"SELECT COUNT(*) FROM {tbl_ident}").fetchall()[0][0])
-    profile: dict[str, Any] = {"row_count": row_cnt, "columns": {}, "partition_hashes": {}}
-
-    if level in ("L2", "L3", "L4"):
-        for col in table.columns:
-            c_q = f'"{col.name}"'
-            if _is_numeric_type(col.data_type):
-                q = (
-                    f"SELECT SUM(CAST({c_q} AS DOUBLE)), MIN({c_q}), MAX({c_q}), "
-                    f"SUM(CASE WHEN {c_q} IS NULL THEN 1 ELSE 0 END), COUNT(DISTINCT {c_q}) "
-                    f"FROM {tbl_ident}"
-                )
-                s_val, min_v, max_v, nulls, distincts = conn.execute(q).fetchall()[0]
-                profile["columns"][col.name] = {
-                    "sum": float(s_val) if s_val is not None else 0.0,
-                    "min": str(min_v) if min_v is not None else None,
-                    "max": str(max_v) if max_v is not None else None,
-                    "null_count": int(nulls or 0),
-                    "distinct_count": int(distincts or 0),
-                }
-            else:
-                q = (
-                    f"SELECT MIN(CAST({c_q} AS VARCHAR)), MAX(CAST({c_q} AS VARCHAR)), "
-                    f"SUM(CASE WHEN {c_q} IS NULL THEN 1 ELSE 0 END), COUNT(DISTINCT {c_q}) "
-                    f"FROM {tbl_ident}"
-                )
-                min_v, max_v, nulls, distincts = conn.execute(q).fetchall()[0]
-                profile["columns"][col.name] = {
-                    "min": str(min_v) if min_v is not None else None,
-                    "max": str(max_v) if max_v is not None else None,
-                    "null_count": int(nulls or 0),
-                    "distinct_count": int(distincts or 0),
-                }
-
-    if level in ("L3", "L4"):
-        pk_cols = [c.name for c in table.columns if c.is_primary_key]
-        key_col = pk_cols[0] if pk_cols else (table.columns[0].name if table.columns else None)
-        if key_col and kind == "duckdb":
-            col_concat = " || '|' || ".join(
-                f"COALESCE(CAST(\"{c.name}\" AS VARCHAR), '')" for c in table.columns
+    t = exp.to_table(conn.qualified(tbl.schema_name, tbl.name), dialect=conn.dialect)
+    sel: list[exp.Expression] = [exp.Count(this=exp.Star())]
+    layout: list[tuple[str, str]] = []
+    for col, kind in zip(tbl.columns, kinds, strict=True):
+        c = exp.column(conn.quote(col.name))
+        nulls = exp.Sum(
+            this=exp.Case()
+            .when(exp.Is(this=c.copy(), expression=exp.Null()), exp.Literal.number(1))
+            .else_(exp.Literal.number(0))
+        )
+        if level == "L1":
+            continue
+        if kind == "number":
+            sel += [
+                exp.Sum(this=exp.cast(c.copy(), "DOUBLE")),
+                exp.Min(this=c.copy()),
+                exp.Max(this=c.copy()),
+                nulls,
+                exp.Count(this=exp.Distinct(expressions=[c.copy()])),
+            ]
+            layout += [(col.name, s) for s in ("sum", "min", "max", "null_count", "distinct_count")]
+        elif kind == "bool":
+            trues = exp.Sum(
+                this=exp.Case().when(c.copy(), exp.Literal.number(1)).else_(exp.Literal.number(0))
             )
-            q = (
-                f'SELECT ABS(HASH("{key_col}")) % 8 AS bucket, '
-                f"COUNT(*) AS cnt, "
-                f"BIT_XOR(HASH({col_concat})) AS bucket_hash "
-                f"FROM {tbl_ident} GROUP BY 1 ORDER BY 1"
+            sel += [trues, nulls]
+            layout += [(col.name, "true_count"), (col.name, "null_count")]
+        elif kind == "lob":
+            sel += [nulls]
+            layout += [(col.name, "null_count")]
+        else:
+            sel += [
+                exp.Min(this=c.copy()),
+                exp.Max(this=c.copy()),
+                nulls,
+                exp.Count(this=exp.Distinct(expressions=[c.copy()])),
+            ]
+            layout += [(col.name, s) for s in ("min", "max", "null_count", "distinct_count")]
+    row = conn.query(conn.render(exp.select(*sel).from_(t)))[0]
+    prof: dict[str, Any] = {"row_count": int(row[0]), "columns": {}, "buckets": {}}
+    for (cname, stat), val in zip(layout, row[1:], strict=True):
+        prof["columns"].setdefault(cname, {})[stat] = _norm(val)
+
+    if level in ("L3", "L4") and key:
+        kc = exp.column(conn.quote(key))
+        bucket = exp.Mod(this=kc, expression=exp.Literal.number(BUCKETS))
+        parts: list[exp.Expression] = [exp.alias_(bucket, "l2c_b"), exp.Count(this=exp.Star())]
+        names: list[str] = ["count"]
+        for col, kind in zip(tbl.columns, kinds, strict=True):
+            c = exp.column(conn.quote(col.name))
+            if kind == "number":
+                parts.append(exp.Sum(this=exp.cast(c, "DOUBLE")))
+                names.append(f"sum:{col.name}")
+            elif kind == "string":
+                parts.append(exp.Sum(this=exp.Length(this=c)))
+                names.append(f"len:{col.name}")
+        q = exp.select(*parts).from_(t).group_by(bucket.copy())
+        for r in conn.query(conn.render(q)):
+            prof["buckets"][str(int(r[0]))] = {
+                n: _norm(v) for n, v in zip(names, r[1:], strict=True)
+            }
+    return prof
+
+
+def _sample(
+    conn: Connector, tbl: TableIR, key_pos: int, buckets: list[str], limit: int
+) -> list[tuple[Any, ...]]:
+    t = exp.to_table(conn.qualified(tbl.schema_name, tbl.name), dialect=conn.dialect)
+    cols = [exp.column(conn.quote(c.name)) for c in tbl.columns]
+    kc = cols[key_pos].copy()
+    q = exp.select(*cols).from_(t)
+    if buckets:
+        q = q.where(
+            exp.In(
+                this=exp.Mod(this=kc.copy(), expression=exp.Literal.number(BUCKETS)),
+                expressions=[exp.Literal.number(int(b)) for b in buckets],
             )
-            for b, cnt, bh in conn.execute(q).fetchall():
-                profile["partition_hashes"][str(b)] = {"count": int(cnt), "hash": str(bh)}
-        elif key_col:
-            # SQLite fallback deterministic bucket digest via ORDER BY key
-            rows = conn.execute(f'SELECT * FROM {tbl_ident} ORDER BY "{key_col}"').fetchall()
-            buckets: dict[str, list[str]] = {}
-            for r in rows:
-                b = str(hash(str(r[0])) % 8)
-                buckets.setdefault(b, []).append("|".join("" if v is None else str(v) for v in r))
-            for b, items in sorted(buckets.items()):
-                digest = hashlib.sha256("\n".join(items).encode("utf-8")).hexdigest()[:16]
-                profile["partition_hashes"][b] = {"count": len(items), "hash": digest}
-
-    return profile
-
-
-def _l4_masked_row_diff(
-    kind_s: str,
-    conn_s: Any,
-    ident_s: str,
-    kind_t: str,
-    conn_t: Any,
-    ident_t: str,
-    table: TableIR,
-    masked_columns: list[str],
-    limit: int,
-) -> dict[str, Any]:
-    """Bounded L4 row-level diff with mandatory PII column masking."""
-    # Order by position, not name: the target table may use different column naming.
-    pk_pos = [i for i, c in enumerate(table.columns, start=1) if c.is_primary_key]
-    order_pos = pk_pos[0] if pk_pos else 1
-    col_names = [c.name for c in table.columns]
-
-    s_rows = conn_s.execute(
-        f"SELECT * FROM {ident_s} ORDER BY {order_pos} LIMIT {limit * 5}"
-    ).fetchall()
-    t_rows = conn_t.execute(
-        f"SELECT * FROM {ident_t} ORDER BY {order_pos} LIMIT {limit * 5}"
-    ).fetchall()
-
-    s_map = {str(r[0]): _json_safe(dict(zip(col_names, r, strict=False))) for r in s_rows}
-    t_map = {str(r[0]): _json_safe(dict(zip(col_names, r, strict=False))) for r in t_rows}
-
-    only_in_source = [
-        mask_row_sample(s_map[k], masked_columns)
-        for k in sorted(s_map.keys() - t_map.keys())[:limit]
-    ]
-    only_in_target = [
-        mask_row_sample(t_map[k], masked_columns)
-        for k in sorted(t_map.keys() - s_map.keys())[:limit]
-    ]
-    value_mismatches: list[dict[str, Any]] = []
-    for k in sorted(s_map.keys() & t_map.keys()):
-        if s_map[k] != t_map[k]:
-            value_mismatches.append(
-                {
-                    "key": k,
-                    "source": mask_row_sample(s_map[k], masked_columns),
-                    "target": mask_row_sample(t_map[k], masked_columns),
-                }
-            )
-            if len(value_mismatches) >= limit:
-                break
-
-    return {
-        "only_in_source_count": len(s_map.keys() - t_map.keys()),
-        "only_in_target_count": len(t_map.keys() - s_map.keys()),
-        "value_mismatch_count": len(value_mismatches),
-        "only_in_source_sample": only_in_source,
-        "only_in_target_sample": only_in_target,
-        "value_mismatch_sample": value_mismatches,
-        "masked_columns": masked_columns,
-    }
+        )
+    q = q.order_by(kc).limit(limit)
+    return conn.query(conn.render(q))
 
 
 class SqlPushdownValidator(Validator):
-    """Pushed-down L1-L4 & Job-Level SQL validator across engines."""
+    """L1-L4 reconciliation across any two supported engines."""
 
     manifest = PluginManifest(
         plugin_type="Validator",
         name="sql_pushdown_validator",
-        version="0.1.0",
-        supported_versions=["Snowflake", "Databricks", "Fabric", "DuckDB", "SQLite"],
-        capabilities={"L1": True, "L2": True, "L3": True, "L4": True, "JOB": True},
-        description="Executes pushed-down L1-L4 reconciliation and job-level equivalence checks.",
+        version="0.2.0",
+        supported_versions=[
+            "SQL Server",
+            "PostgreSQL",
+            "Snowflake",
+            "Databricks",
+            "Fabric",
+            "DuckDB",
+            "SQLite",
+        ],
+        capabilities={"L1": True, "L2": True, "L3": True, "L4": True, "cross_engine": True},
+        description="Pushed-down aggregate checks rendered per engine dialect, masked L4 samples.",
     )
 
     def reconcile_table(
@@ -227,98 +228,147 @@ class SqlPushdownValidator(Validator):
         target_table: TableIR | None = None,
     ) -> ValidationOutcome:
         tt = target_table or table
-        src_resolved = resolve_connection_uri(source_uri)
-        tgt_resolved = resolve_connection_uri(target_uri)
-        level = rule.level
+        level = "L2" if rule.level == "JOB" else rule.level
+        kinds = [_kind(c.data_type) for c in table.columns]
+        keys = [i for i, c in enumerate(table.columns) if c.is_primary_key]
+        key_pos = keys[0] if len(keys) == 1 else None
+        int_key = key_pos is not None and _base(table.columns[key_pos].data_type) in INTEGER_TYPES
+        tol = rule.numeric_tolerance
 
-        kind_s, conn_s = _open_conn(src_resolved)
-        kind_t, conn_t = _open_conn(tgt_resolved)
-        try:
-            ident_s = _table_ident(kind_s, conn_s, table)
-            ident_t = _table_ident(kind_t, conn_t, tt)
-            src_metrics = _pushed_down_profile(kind_s, conn_s, ident_s, table, level)
-            tgt_metrics = _pushed_down_profile(kind_t, conn_t, ident_t, tt, level)
-            # Compare column-for-column by position: the target may rename columns.
-            rename = {t.name: s.name for s, t in zip(table.columns, tt.columns, strict=False)}
-            tgt_metrics["columns"] = {
-                rename.get(k, k): v for k, v in tgt_metrics.get("columns", {}).items()
+        with (
+            open_connector(source_uri, read_only=True) as src,
+            open_connector(target_uri, read_only=True) as tgt,
+        ):
+            s = _profile(src, table, kinds, level, table.columns[key_pos].name if int_key else None)
+            t = _profile(tgt, tt, kinds, level, tt.columns[key_pos].name if int_key else None)
+            # Report the target in source column names (target may rename by naming rules).
+            rename = {tc.name: sc.name for sc, tc in zip(table.columns, tt.columns, strict=True)}
+            t["columns"] = {rename.get(k, k): v for k, v in t["columns"].items()}
+            t["buckets"] = {
+                b: {
+                    f"{n.split(':', 1)[0]}:{rename.get(n.split(':', 1)[1], n.split(':', 1)[1])}"
+                    if ":" in n
+                    else n: v
+                    for n, v in m.items()
+                }
+                for b, m in t["buckets"].items()
             }
 
             diffs: dict[str, Any] = {}
-            within_tol = False
-            failed = False
-
-            if src_metrics["row_count"] != tgt_metrics["row_count"]:
+            failed = within = False
+            if s["row_count"] != t["row_count"]:
                 failed = True
-                diffs["row_count_delta"] = tgt_metrics["row_count"] - src_metrics["row_count"]
+                diffs["row_count_delta"] = t["row_count"] - s["row_count"]
 
             col_diffs: dict[str, Any] = {}
-            for col_name, s_col in src_metrics.get("columns", {}).items():
-                t_col = tgt_metrics.get("columns", {}).get(col_name, {})
-                if "sum" in s_col and "sum" in t_col:
-                    delta = abs(float(s_col["sum"]) - float(t_col["sum"]))
-                    if delta > 0:
-                        if delta <= rule.numeric_tolerance:
-                            within_tol = True
-                            col_diffs[col_name] = {"sum_delta": delta, "status": "within_tolerance"}
-                        else:
+            kind_of = {c.name: k for c, k in zip(table.columns, kinds, strict=True)}
+            for cname, sc in s["columns"].items():
+                tc = t["columns"].get(cname, {})
+                for stat, sv in sc.items():
+                    tv = tc.get(stat)
+                    if (
+                        stat in ("sum", "min", "max")
+                        and isinstance(sv, float)
+                        and isinstance(tv, float)
+                    ):
+                        ok, delta = _close(sv, tv, tol)
+                        if not ok:
                             failed = True
-                            col_diffs[col_name] = {"sum_delta": delta, "status": "failed"}
-                for stat in ("null_count", "distinct_count", "min", "max"):
-                    if s_col.get(stat) != t_col.get(stat):
-                        failed = True
-                        col_diffs.setdefault(col_name, {})[stat] = {
-                            "source": s_col.get(stat),
-                            "target": t_col.get(stat),
+                            col_diffs.setdefault(cname, {})[stat] = {
+                                "source": sv,
+                                "target": tv,
+                                "delta": delta,
+                            }
+                        elif delta > 0 and not math.isclose(sv, tv, rel_tol=1e-12):
+                            within = within or delta > 1e-9 * max(1.0, abs(sv))
+                            if within:
+                                col_diffs.setdefault(cname, {})[stat] = {
+                                    "delta": delta,
+                                    "status": "within_tolerance",
+                                }
+                    elif (
+                        sv != tv
+                        and stat == "distinct_count"
+                        and kind_of[cname] == "number"
+                        and tol > 0
+                    ):
+                        # Drift inside the tolerance can merge or split values; sums, min/max and
+                        # bucket fingerprints still catch real differences.
+                        within = True
+                        col_diffs.setdefault(cname, {})[stat] = {
+                            "source": sv,
+                            "target": tv,
+                            "status": "within_tolerance",
                         }
+                    elif sv != tv:
+                        failed = True
+                        col_diffs.setdefault(cname, {})[stat] = {"source": sv, "target": tv}
             if col_diffs:
                 diffs["column_diffs"] = col_diffs
 
-            if (
-                level in ("L3", "L4")
-                and src_metrics["partition_hashes"] != tgt_metrics["partition_hashes"]
-            ):
-                failed = True
-                diffs["partition_hash_mismatches"] = {
-                    b: {
-                        "source": src_metrics["partition_hashes"].get(b),
-                        "target": tgt_metrics["partition_hashes"].get(b),
-                    }
-                    for b in sorted(
-                        set(src_metrics["partition_hashes"]) | set(tgt_metrics["partition_hashes"])
+            bad_buckets: list[str] = []
+            if level in ("L3", "L4"):
+                if not int_key:
+                    diffs["l3_note"] = "No single-column integer key: bucket fingerprints skipped."
+                for b in sorted(set(s["buckets"]) | set(t["buckets"]), key=int):
+                    sb, tb = s["buckets"].get(b, {}), t["buckets"].get(b, {})
+                    same = sb.keys() == tb.keys() and all(
+                        _close(sb[k], tb[k], tol)[0]
+                        if isinstance(sb[k], float) and isinstance(tb[k], float)
+                        else sb[k] == tb[k]
+                        for k in sb
                     )
-                    if src_metrics["partition_hashes"].get(b)
-                    != tgt_metrics["partition_hashes"].get(b)
-                }
+                    if not same:
+                        bad_buckets.append(b)
+                if bad_buckets:
+                    failed = True
+                    diffs["bucket_mismatches"] = {
+                        b: {"source": s["buckets"].get(b), "target": t["buckets"].get(b)}
+                        for b in bad_buckets
+                    }
 
-            if level == "L4" or (failed and level in ("L2", "L3")):
+            if key_pos is not None and (level == "L4" or failed):
+                limit = config.reconciliation.l4_sample_limit
                 masked = sorted(
                     set(config.reconciliation.masked_columns) | set(rule.masked_columns)
                 )
-                diffs["l4_diff"] = _l4_masked_row_diff(
-                    kind_s,
-                    conn_s,
-                    ident_s,
-                    kind_t,
-                    conn_t,
-                    ident_t,
-                    table,
-                    masked,
-                    config.reconciliation.l4_sample_limit,
-                )
+                names = [c.name for c in table.columns]
+                s_rows = {
+                    _norm(r[key_pos]): dict(zip(names, map(_norm, r), strict=True))
+                    for r in _sample(src, table, key_pos, bad_buckets, limit * 5)
+                }
+                t_rows = {
+                    _norm(r[key_pos]): dict(zip(names, map(_norm, r), strict=True))
+                    for r in _sample(tgt, tt, key_pos, bad_buckets, limit * 5)
+                }
+                mism = [
+                    {
+                        "key": k,
+                        "source": mask_row_sample(s_rows[k], masked),
+                        "target": mask_row_sample(t_rows[k], masked),
+                    }
+                    for k in sorted(s_rows.keys() & t_rows.keys(), key=str)
+                    if s_rows[k] != t_rows[k]
+                ][:limit]
+                diffs["l4_diff"] = {
+                    "only_in_source_count": len(s_rows.keys() - t_rows.keys()),
+                    "only_in_target_count": len(t_rows.keys() - s_rows.keys()),
+                    "value_mismatch_count": len(mism),
+                    "only_in_source_sample": [
+                        mask_row_sample(s_rows[k], masked)
+                        for k in sorted(s_rows.keys() - t_rows.keys(), key=str)[:limit]
+                    ],
+                    "only_in_target_sample": [
+                        mask_row_sample(t_rows[k], masked)
+                        for k in sorted(t_rows.keys() - s_rows.keys(), key=str)[:limit]
+                    ],
+                    "value_mismatch_sample": mism,
+                    "masked_columns": masked,
+                    "sampled_buckets": bad_buckets or "first rows by key",
+                }
 
-            verdict = "fail" if failed else ("pass_within_tolerance" if within_tol else "pass")
-            return ValidationOutcome(
-                object_key=table.fqn,
-                level=level,
-                verdict=verdict,
-                source_metrics=_json_safe(src_metrics),
-                target_metrics=_json_safe(tgt_metrics),
-                diff_summary=_json_safe(diffs),
-            )
-        finally:
-            conn_s.close()
-            conn_t.close()
+        verdict = "fail" if failed else ("pass_within_tolerance" if within else "pass")
+        return ValidationOutcome(table.fqn, level, verdict, s, t, diffs)
 
     def reconcile_job(
         self,
@@ -329,28 +379,56 @@ class SqlPushdownValidator(Validator):
         target_uri: str,
         numeric_tolerance: float = 0.0,
     ) -> ValidationOutcome:
-        """Execute legacy query vs converted target query on same inputs and verify identical outputs."""
-        src_resolved = resolve_connection_uri(source_uri)
-        tgt_resolved = resolve_connection_uri(target_uri)
-        _kind_s, conn_s = _open_conn(src_resolved)
-        _kind_t, conn_t = _open_conn(tgt_resolved)
-        try:
-            s_rows = conn_s.execute(legacy_sql).fetchall()
-            t_rows = conn_t.execute(target_sql).fetchall()
-            s_set = sorted(tuple(str(v) for v in r) for r in s_rows)
-            t_set = sorted(tuple(str(v) for v in r) for r in t_rows)
-            match = s_set == t_set
-            return ValidationOutcome(
-                object_key=package.id,
-                level="JOB",
-                verdict="pass" if match else "fail",
-                source_metrics={"output_rows": len(s_rows)},
-                target_metrics={"output_rows": len(t_rows)},
-                diff_summary={} if match else {"sample_mismatch": True},
+        """Run the legacy query and the converted query and compare their outputs as row sets."""
+        with (
+            open_connector(source_uri, read_only=True) as src,
+            open_connector(target_uri, read_only=True) as tgt,
+        ):
+            s_rows = sorted((tuple(_norm(v) for v in r) for r in src.query(legacy_sql)), key=repr)
+            t_rows = sorted((tuple(_norm(v) for v in r) for r in tgt.query(target_sql)), key=repr)
+        match = len(s_rows) == len(t_rows) and all(
+            all(
+                _close(a, b, numeric_tolerance)[0]
+                if isinstance(a, float) and isinstance(b, float)
+                else a == b
+                for a, b in zip(x, y, strict=True)
             )
-        finally:
-            conn_s.close()
-            conn_t.close()
+            for x, y in zip(s_rows, t_rows, strict=True)
+        )
+        return ValidationOutcome(
+            package.id,
+            "JOB",
+            "pass" if match else "fail",
+            {"output_rows": len(s_rows)},
+            {"output_rows": len(t_rows)},
+            {} if match else {"sample_mismatch": True},
+        )
 
     def run_golden_check(self) -> tuple[bool, str]:
-        return True, "SqlPushdownValidator golden check passed"
+        from accelerator.connectors.base import DuckDBConnector
+        from accelerator.ir.models import ColumnIR
+
+        conn = DuckDBConnector(":memory:")
+        conn.execute("CREATE TABLE t (id INT, v DECIMAL(10,2), s VARCHAR)")
+        conn.execute("INSERT INTO t VALUES (1, 2.50, 'a'), (2, NULL, 'bb')")
+        tbl = TableIR(
+            schema_name="",
+            name="t",
+            columns=[
+                ColumnIR(name="id", data_type="INT", is_primary_key=True),
+                ColumnIR(name="v", data_type="DECIMAL(10,2)"),
+                ColumnIR(name="s", data_type="VARCHAR"),
+            ],
+        )
+        prof = _profile(conn, tbl, [_kind(c.data_type) for c in tbl.columns], "L3", "id")
+        conn.close()
+        ok = (
+            prof["row_count"] == 2
+            and prof["columns"]["v"]["sum"] == 2.5
+            and prof["columns"]["v"]["null_count"] == 0 + 1
+            and len(prof["buckets"]) == 2
+        )
+        return (
+            ok,
+            "SqlPushdownValidator golden check passed" if ok else f"Unexpected profile: {prof}",
+        )

@@ -25,6 +25,8 @@ DIALECT_MAP: dict[str, str] = {
     "spark": "spark",
     "duckdb": "duckdb",
     "sqlite": "sqlite",
+    "postgres": "postgres",
+    "postgresql": "postgres",
     "neutral": "postgres",
 }
 

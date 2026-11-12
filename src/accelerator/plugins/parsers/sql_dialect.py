@@ -272,3 +272,14 @@ class BteqParser(_BaseSqlParser):
         supported_versions=["Teradata BTEQ"],
         capabilities={"bteq": True, "dml": True},
     )
+
+
+class PgSqlParser(_BaseSqlParser):
+    source_tool = "postgres"
+    manifest = PluginManifest(
+        plugin_type="Parser",
+        name="pgsql_parser",
+        version="0.1.0",
+        supported_versions=["PostgreSQL 12+"],
+        capabilities={"ddl": True, "dml": True, "views": True},
+    )
