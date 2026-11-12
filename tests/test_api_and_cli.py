@@ -62,6 +62,19 @@ def test_api_rbac_and_full_flow(isolated_env: Path) -> None:
         assert pipe_resp.status_code == 200, pipe_resp.text
         assert pipe_resp.json()["reconcile"]["passed"] == 5
 
+        # The project team must be added as members before they can see it.
+        for who, role in (
+            ("engineer", "engineer"),
+            ("approver", "client_approver"),
+            ("viewer", "viewer"),
+        ):
+            r = client.post(
+                f"/api/v1/projects/{pid}/members",
+                json={"username": who, "role_name": role},
+                headers=a_headers,
+            )
+            assert r.status_code == 200, r.text
+
         # Engineer cannot perform Client Approver Sign-Off (403)!
         e_login = client.post(
             "/api/v1/auth/login", json={"username": "engineer", "password": "admin123!"}

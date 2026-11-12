@@ -5,7 +5,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
-from accelerator.api.deps import CurrentUser, get_db, require_perm
+from accelerator.api.deps import CurrentUser, get_db, require_project_perm
 from accelerator.api.schemas import DeployRequest, ResidueDecisionRequest
 from accelerator.core.security import Permission
 from accelerator.db.models import ResidueItem
@@ -17,7 +17,7 @@ router = APIRouter(prefix="/api/v1/projects/{project_id}", tags=["review"])
 @router.get("/residues")
 def list_residues(
     project_id: str,
-    _user: CurrentUser = Depends(require_perm(Permission.VIEW_REPORTS)),
+    _user: CurrentUser = Depends(require_project_perm(Permission.VIEW_REPORTS)),
     db: Session = Depends(get_db),
 ) -> list[dict[str, object]]:
     items = db.query(ResidueItem).filter(ResidueItem.project_id == project_id).all()
@@ -42,7 +42,7 @@ def list_residues(
 def ai_propose_residue(
     project_id: str,
     residue_id: str,
-    user: CurrentUser = Depends(require_perm(Permission.REVIEW_RESIDUE)),
+    user: CurrentUser = Depends(require_project_perm(Permission.REVIEW_RESIDUE)),
     db: Session = Depends(get_db),
 ) -> dict[str, object]:
     item = ConvertEngine().propose_ai_fix(
@@ -63,7 +63,7 @@ def decide_residue(
     project_id: str,
     residue_id: str,
     body: ResidueDecisionRequest,
-    user: CurrentUser = Depends(require_perm(Permission.REVIEW_RESIDUE)),
+    user: CurrentUser = Depends(require_project_perm(Permission.REVIEW_RESIDUE)),
     db: Session = Depends(get_db),
 ) -> dict[str, object]:
     item = ConvertEngine().decide_residue(
@@ -85,7 +85,7 @@ def deploy_object(
     project_id: str,
     object_key: str,
     body: DeployRequest = DeployRequest(),
-    user: CurrentUser = Depends(require_perm(Permission.DEPLOY_CODE)),
+    user: CurrentUser = Depends(require_project_perm(Permission.DEPLOY_CODE)),
     db: Session = Depends(get_db),
 ) -> dict[str, object]:
     status = ConvertEngine().approve_and_deploy_object(

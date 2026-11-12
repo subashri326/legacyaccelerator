@@ -10,17 +10,20 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from accelerator.api.routers import auth, objects, plugins, projects, review, stages, track
-from accelerator.config.settings import get_settings
+from accelerator.config.settings import Settings, get_settings
 from accelerator.core.exceptions import (
     AuthenticationError,
     AuthorizationError,
     ConfigError,
     EvidenceRequiredError,
+    NotFoundError,
     PluginNotFoundError,
     StateTransitionError,
+    UnsafePathError,
 )
 from accelerator.core.observability import configure_logging, metrics
 from accelerator.db.session import init_db, session_scope
+from accelerator.engines.reconcile import purge_expired_samples
 from accelerator.plugins.registry import get_plugin_registry
 
 
@@ -29,12 +32,38 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     configure_logging()
     init_db()
     with session_scope() as db:
+        purge_expired_samples(db)
         get_plugin_registry().sync_to_db(db)
     yield
 
 
+DEV_JWT_SECRET = "dev-insecure-secret-change-for-production-32bytes"
+
+
+def check_production_settings(settings: Settings) -> None:
+    """Refuse to start outside dev with settings that are only safe on a laptop."""
+    if settings.is_dev:
+        return
+    problems = []
+    if settings.auth_mode == "local" and (
+        settings.jwt_secret == DEV_JWT_SECRET or len(settings.jwt_secret) < 32
+    ):
+        problems.append("L2C_JWT_SECRET must be set to a random value of at least 32 characters")
+    if settings.auth_mode == "oidc" and not (settings.oidc_issuer and settings.oidc_audience):
+        problems.append(
+            "L2C_OIDC_ISSUER and L2C_OIDC_AUDIENCE are required when L2C_AUTH_MODE=oidc"
+        )
+    if "*" in settings.cors_allowed_origins:
+        problems.append("L2C_CORS_ALLOWED_ORIGINS must list the UI origins explicitly, not '*'")
+    if problems:
+        raise RuntimeError(
+            f"Unsafe configuration for environment '{settings.environment}': " + "; ".join(problems)
+        )
+
+
 def create_app() -> FastAPI:
     settings = get_settings()
+    check_production_settings(settings)
     app = FastAPI(
         title=settings.app_name,
         version="0.1.0",
@@ -42,10 +71,10 @@ def create_app() -> FastAPI:
     )
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_origins=settings.cors_allowed_origins,
+        allow_credentials=False,  # bearer tokens, no cookies
+        allow_methods=["GET", "POST", "DELETE"],
+        allow_headers=["Authorization", "Content-Type"],
     )
 
     @app.exception_handler(AuthenticationError)
@@ -72,9 +101,17 @@ def create_app() -> FastAPI:
     async def _plugin_err(_req: Request, exc: PluginNotFoundError) -> JSONResponse:
         return JSONResponse(status_code=400, content={"detail": str(exc)})
 
+    @app.exception_handler(NotFoundError)
+    async def _nf_err(_req: Request, exc: NotFoundError) -> JSONResponse:
+        return JSONResponse(status_code=404, content={"detail": str(exc)})
+
+    @app.exception_handler(UnsafePathError)
+    async def _path_err(_req: Request, exc: UnsafePathError) -> JSONResponse:
+        return JSONResponse(status_code=400, content={"detail": str(exc)})
+
     @app.exception_handler(ValueError)
     async def _val_err(_req: Request, exc: ValueError) -> JSONResponse:
-        return JSONResponse(status_code=404, content={"detail": str(exc)})
+        return JSONResponse(status_code=400, content={"detail": str(exc)})
 
     @app.get("/healthz", tags=["platform"])
     def healthz() -> dict[str, str]:

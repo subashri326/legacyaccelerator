@@ -37,3 +37,11 @@ class AuthorizationError(AcceleratorError):
 
 class SecretsError(AcceleratorError):
     """Failed to retrieve or resolve a credential reference."""
+
+
+class NotFoundError(AcceleratorError):
+    """The requested resource does not exist (or the caller may not know it exists)."""
+
+
+class UnsafePathError(AcceleratorError):
+    """A file path or name points outside the places the product is allowed to read or write."""

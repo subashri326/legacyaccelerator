@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from accelerator.api.deps import CurrentUser, get_current_user, get_db, require_perm
 from accelerator.api.schemas import CreateUserRequest, LoginRequest, TokenResponse
+from accelerator.config.settings import get_settings
 from accelerator.core.exceptions import AuthenticationError
 from accelerator.core.security import (
     ROLE_PERMISSIONS,
@@ -24,8 +25,19 @@ router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
 
 @router.post("/login", response_model=TokenResponse)
 def login(body: LoginRequest, db: Session = Depends(get_db)) -> TokenResponse:
+    if get_settings().auth_mode == "oidc":
+        raise AuthenticationError("Password sign-in is disabled; sign in through single sign-on")
     user = db.query(User).filter(User.username == body.username, User.is_active.is_(True)).first()
     if user is None or not verify_password(body.password, user.password_hash):
+        record_audit(
+            db,
+            actor=body.username[:120],
+            actor_role="unknown",
+            action="auth.login_failed",
+            resource_type="app_user",
+            resource_id=body.username[:200],
+        )
+        db.commit()
         raise AuthenticationError("Invalid username or password")
 
     token = create_access_token(subject=user.username, role=user.role_name, email=user.email)
