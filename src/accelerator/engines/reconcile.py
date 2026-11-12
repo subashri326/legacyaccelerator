@@ -14,6 +14,7 @@ from accelerator.db.base import utcnow
 from accelerator.db.models import (
     DbColumn,
     DbObject,
+    ObjectStatus,
     ReconResult,
     ReconRule,
     ReconRun,
@@ -22,6 +23,7 @@ from accelerator.db.models import (
 from accelerator.db.repository import get_active_config, record_audit
 from accelerator.engines.state_machine import ObjectState, StateMachine
 from accelerator.ir.models import ColumnIR, TableIR
+from accelerator.plugins.interfaces import ValidationOutcome
 from accelerator.plugins.registry import PluginRegistry, get_plugin_registry
 
 
@@ -33,6 +35,7 @@ class ReconcileSummary:
     passed: int
     passed_within_tolerance: int
     failed: int
+    skipped_not_loaded: int = 0
 
 
 class ReconcileEngine:
@@ -87,9 +90,23 @@ class ReconcileEngine:
             passed = 0
             within_tol = 0
             failed = 0
+            skipped = 0
+            states = {
+                s.object_key: s.state
+                for s in db.query(ObjectStatus).filter(ObjectStatus.project_id == project_id)
+            }
+            generator = self.registry.get_generator(cfg.require_target())
             retention_dt = utcnow() + timedelta(days=cfg.reconciliation.l4_retention_days)
 
             for obj in tables:
+                # Only tables that have actually been loaded can be compared.
+                if states.get(obj.fqn) not in (
+                    ObjectState.LOADED.value,
+                    ObjectState.VALIDATED.value,
+                    ObjectState.SIGNED_OFF.value,
+                ):
+                    skipped += 1
+                    continue
                 cols = (
                     db.query(DbColumn)
                     .filter(DbColumn.db_object_id == obj.id)
@@ -139,13 +156,22 @@ class ReconcileEngine:
                     existing_rule.numeric_tolerance = rule.numeric_tolerance
                     existing_rule.masked_columns = rule.masked_columns
 
-                outcome = validator.reconcile_table(
-                    table=tbl_ir,
-                    rule=rule,
-                    source_uri=cfg.source.connection,
-                    target_uri=cfg.target.connection,
-                    config=cfg,
-                )
+                try:
+                    outcome = validator.reconcile_table(
+                        table=tbl_ir,
+                        rule=rule,
+                        source_uri=cfg.source.connection,
+                        target_uri=cfg.target.connection,
+                        config=cfg,
+                        target_table=generator.target_table(tbl_ir, cfg),
+                    )
+                except Exception as exc:  # one bad table must not stop the whole run
+                    outcome = ValidationOutcome(
+                        object_key=obj.fqn,
+                        level=rule.level,
+                        verdict="fail",
+                        diff_summary={"error": f"{type(exc).__name__}: {exc}"},
+                    )
 
                 evidence_payload = {
                     "recon_run_id": recon_run.id,
@@ -231,8 +257,9 @@ class ReconcileEngine:
             return ReconcileSummary(
                 recon_run_id=recon_run.id,
                 project_id=project_id,
-                tables_checked=len(tables),
+                tables_checked=len(tables) - skipped,
                 passed=passed,
                 passed_within_tolerance=within_tol,
                 failed=failed,
+                skipped_not_loaded=skipped,
             )

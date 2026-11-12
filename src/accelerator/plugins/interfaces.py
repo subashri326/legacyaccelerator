@@ -49,6 +49,8 @@ class GeneratedResidue:
     reason_code: str
     reason_detail: str
     original_snippet: str
+    # Stable id of the component in the neutral model (node or task id); approved fixes key on it.
+    component_key: str = ""
 
 
 @dataclass
@@ -143,6 +145,10 @@ class TargetGenerator(BasePlugin):
     ) -> GeneratedBundle:
         """Generate SQL/dbt/PySpark/orchestration files and collect flagged residues."""
 
+    def target_table(self, table: TableIR, config: ClientConfig) -> TableIR:
+        """The table as it is named on the target after naming rules (same column order)."""
+        return table
+
     @abstractmethod
     def compile_check(
         self,
@@ -168,6 +174,7 @@ class Mover(BasePlugin):
         existing_completed_partitions: set[int] | None = None,
         staging_writer: Callable[[int, bytes], str] | None = None,
         target_ddl_sql: str | None = None,
+        target_table: TableIR | None = None,
     ) -> MoveOutcome:
         """Execute partitioned bulk or watermark incremental load with checkpoints."""
 
@@ -183,8 +190,13 @@ class Validator(BasePlugin):
         source_uri: str,
         target_uri: str,
         config: ClientConfig,
+        target_table: TableIR | None = None,
     ) -> ValidationOutcome:
-        """Compare source and target tables using pushed-down queries."""
+        """Compare source and target tables using pushed-down queries.
+
+        `target_table` is the table as named on the target (after naming rules); its columns are in
+        the same order as the source table's. Defaults to the source naming.
+        """
 
     def reconcile_job(
         self,

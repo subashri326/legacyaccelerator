@@ -111,7 +111,8 @@ movement:
     out = val.reconcile_job(
         package=PackageIR(id="job1", name="job1", source_tool="tsql", source_artifact_name="j.sql"),
         legacy_sql="SELECT COUNT(*), SUM(amount) FROM dbo.events",
-        target_sql="SELECT COUNT(*), SUM(amount) FROM dbo.events",
+        # Loads now use target naming rules: {layer}_{source_db} schema, upper-case table.
+        target_sql="SELECT COUNT(*), SUM(amount) FROM CURATED_SRC_INC.EVENTS",
         source_uri="vault://inc/src",
         target_uri="vault://inc/tgt",
     )

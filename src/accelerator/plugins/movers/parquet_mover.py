@@ -112,7 +112,9 @@ class ParquetMover(Mover):
         existing_completed_partitions: set[int] | None = None,
         staging_writer: Callable[[int, bytes], str] | None = None,
         target_ddl_sql: str | None = None,
+        target_table: TableIR | None = None,
     ) -> MoveOutcome:
+        tt = target_table or table
         src_resolved = resolve_connection_uri(source_uri)
         tgt_resolved = resolve_connection_uri(target_uri)
         completed_set = existing_completed_partitions or set()
@@ -196,8 +198,8 @@ class ParquetMover(Mover):
             tgt_kind, tgt_conn = _connect_local_db(tgt_resolved)
             try:
                 if tgt_kind == "duckdb":
-                    tgt_conn.execute(f'CREATE SCHEMA IF NOT EXISTS "{table.schema_name}"')
-                tgt_tbl_sql = _qualified_table(tgt_kind, table)
+                    tgt_conn.execute(f'CREATE SCHEMA IF NOT EXISTS "{tt.schema_name}"')
+                tgt_tbl_sql = _qualified_table(tgt_kind, tt)
 
                 if mode == "bulk" and not completed_set:
                     tgt_conn.execute(f"DROP TABLE IF EXISTS {tgt_tbl_sql}")
@@ -205,8 +207,10 @@ class ParquetMover(Mover):
                 for p_idx, pred, chunk_rows, pq_bytes, checksum in extracted_chunks:
                     p_uri = staged_uris.get(p_idx, f"memory://part_{p_idx}.parquet")
                     chunk_arrow = pq.read_table(io.BytesIO(pq_bytes))
+                    if len(tt.columns) == chunk_arrow.num_columns:  # apply target column naming
+                        chunk_arrow = chunk_arrow.rename_columns([c.name for c in tt.columns])
                     if tgt_kind == "duckdb":
-                        tbl_exists = _sqlite_or_duck_exists("duckdb", tgt_conn, table)
+                        tbl_exists = _sqlite_or_duck_exists("duckdb", tgt_conn, tt)
                         tgt_conn.register("_l2c_chunk_arrow", chunk_arrow)
                         if not tbl_exists:
                             tgt_conn.execute(
@@ -218,7 +222,7 @@ class ParquetMover(Mover):
                             )
                         tgt_conn.unregister("_l2c_chunk_arrow")
                     else:
-                        tbl_name_sqlite = f"{table.schema_name}.{table.name}"
+                        tbl_name_sqlite = f"{tt.schema_name}.{tt.name}"
                         if_exists = (
                             "replace"
                             if (mode == "bulk" and p_idx == 0 and not completed_set)
@@ -243,7 +247,7 @@ class ParquetMover(Mover):
                     )
                     native_copy_statements.append(
                         build_native_bulk_load_sql(
-                            config.target.platform, table.schema_name, table.name, p_uri
+                            config.target.platform, tt.schema_name, tt.name, p_uri
                         )
                     )
                 if tgt_kind == "sqlite":
@@ -251,13 +255,13 @@ class ParquetMover(Mover):
             finally:
                 tgt_conn.close()
         else:
-            for p_idx, pred, df, _pq_bytes, checksum in extracted_chunks:
-                p_uri = staged_uris.get(p_idx, f"staged://{table.name}/part_{p_idx}.parquet")
-                rows_n = len(df)
+            for p_idx, pred, chunk_rows, _pq_bytes, checksum in extracted_chunks:
+                p_uri = staged_uris.get(p_idx, f"staged://{tt.name}/part_{p_idx}.parquet")
+                rows_n = chunk_rows
                 total_loaded += rows_n
                 native_copy_statements.append(
                     build_native_bulk_load_sql(
-                        config.target.platform, table.schema_name, table.name, p_uri
+                        config.target.platform, tt.schema_name, tt.name, p_uri
                     )
                 )
                 partition_results.append(
@@ -280,7 +284,10 @@ class ParquetMover(Mover):
             partitions=partition_results,
             evidence={
                 "native_bulk_commands": native_copy_statements,
-                "target_ddl_executed": bool(target_ddl_sql),
+                "target_table": f"{tt.schema_name}.{tt.name}",
+                # Local stand-in targets create the table from the data; the generated DDL is
+                # executed on real targets by the target connector.
+                "target_ddl_executed": False,
                 "skipped_checkpointed_partitions": sorted(completed_set),
             },
         )

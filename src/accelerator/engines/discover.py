@@ -92,7 +92,11 @@ class DiscoverEngine:
                 is_dead = bool(usage_map and reads == 0) or tbl.is_dead_candidate
                 if is_dead:
                     dead_candidates += 1
-                tbl_hash = hashlib.sha256(tbl.model_dump_json().encode("utf-8")).hexdigest()
+                # Structure only: row counts change daily and must not count as a source change.
+                structure = [
+                    (c.name, c.data_type, c.nullable, c.is_primary_key) for c in tbl.columns
+                ]
+                tbl_hash = hashlib.sha256(repr(structure).encode("utf-8")).hexdigest()
                 db_obj = self._upsert_db_object(
                     db=db,
                     project_id=project_id,
@@ -129,7 +133,7 @@ class DiscoverEngine:
                             created_by=actor,
                         )
                     )
-                StateMachine.ensure_object(db, project_id, tbl.fqn, "table", actor=actor)
+                StateMachine.record_source(db, project_id, tbl.fqn, "table", tbl_hash, actor)
 
             # Upsert views
             for vw in catalog.views:
@@ -156,7 +160,7 @@ class DiscoverEngine:
                     content_hash=vw_hash,
                     actor=actor,
                 )
-                StateMachine.ensure_object(db, project_id, fqn, "view", actor=actor)
+                StateMachine.record_source(db, project_id, fqn, "view", vw_hash, actor)
 
             # Upsert stored procedures
             for proc in catalog.procedures:
@@ -183,7 +187,7 @@ class DiscoverEngine:
                     content_hash=p_hash,
                     actor=actor,
                 )
-                StateMachine.ensure_object(db, project_id, fqn, "procedure", actor=actor)
+                StateMachine.record_source(db, project_id, fqn, "procedure", p_hash, actor)
 
             # Collect ETL & SQL artifacts
             all_etl_paths: list[str | Path] = list(cfg.source.etl_export_paths)
@@ -229,7 +233,9 @@ class DiscoverEngine:
                     existing_job.source_tool = item.source_tool
                     existing_job.content_hash = art_row.content_hash
                 etl_count += 1
-                StateMachine.ensure_object(db, project_id, job_name, "etl_job", actor=actor)
+                StateMachine.record_source(
+                    db, project_id, job_name, "etl_job", art_row.content_hash, actor
+                )
 
             record_audit(
                 db,

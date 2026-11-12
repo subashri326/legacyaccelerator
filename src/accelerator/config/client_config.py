@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from pathlib import Path
 from typing import Any, Literal
 
@@ -64,11 +65,70 @@ class TypeOverride(BaseModel):
     target: str
 
 
+_RULE_CLAUSE = re.compile(
+    r"^(component_type|component_name|object_key)\s*(==|!=|contains|startswith|endswith)\s*'([^']*)'$"
+)
+
+
 class CustomRule(BaseModel):
+    """A client rule such as `component_type == 'ScriptTask'`.
+
+    Grammar: clauses `<field> <op> '<value>'` joined by `and` / `or` (and binds tighter).
+    Fields: component_type, component_name, object_key. Ops: ==, !=, contains, startswith, endswith.
+    Matching is case-insensitive; component_type also matches its last dotted part
+    (so 'DerivedColumn' matches 'Microsoft.DerivedColumn').
+    """
+
     match: str
     action: Literal["flag_manual", "flag_review", "auto_convert", "skip"] = "flag_manual"
     reason: str = "Matched client custom rule"
     effort_days_override: float | None = None
+
+    @field_validator("match")
+    @classmethod
+    def _check_grammar(cls, v: str) -> str:
+        for group in re.split(r"\s+or\s+", v.strip()):
+            for clause in re.split(r"\s+and\s+", group.strip()):
+                if not _RULE_CLAUSE.match(clause.strip()):
+                    raise ValueError(
+                        f"Invalid rule clause {clause!r}; expected e.g. component_type == 'ScriptTask'"
+                    )
+        return v
+
+    def matches(
+        self, component_type: str = "", component_name: str = "", object_key: str = ""
+    ) -> bool:
+        values = {
+            "component_type": component_type,
+            "component_name": component_name,
+            "object_key": object_key,
+        }
+
+        def clause_ok(clause: str) -> bool:
+            m = _RULE_CLAUSE.match(clause.strip())
+            assert m is not None
+            field_name, op, want = m.groups()
+            have = (values[field_name] or "").lower()
+            want = want.lower()
+            candidates = [have]
+            if field_name == "component_type" and "." in have:
+                candidates.append(have.rsplit(".", 1)[-1])
+            if not have:
+                return op == "!="
+            if op == "==":
+                return want in candidates
+            if op == "!=":
+                return want not in candidates
+            if op == "contains":
+                return any(want in c for c in candidates)
+            if op == "startswith":
+                return any(c.startswith(want) for c in candidates)
+            return any(c.endswith(want) for c in candidates)
+
+        return any(
+            all(clause_ok(c) for c in re.split(r"\s+and\s+", group.strip()))
+            for group in re.split(r"\s+or\s+", self.match.strip())
+        )
 
 
 class EffortRatesConfig(BaseModel):
@@ -172,6 +232,17 @@ class ClientConfig(BaseModel):
                 "Set target.platform in the client config before Convert, Move or Reconcile."
             )
         return self.target.platform
+
+    def matching_rule(
+        self, component_type: str = "", component_name: str = "", object_key: str = ""
+    ) -> CustomRule | None:
+        """First flag_manual / flag_review rule that matches a component, if any."""
+        for rule in self.custom_rules:
+            if rule.action in ("flag_manual", "flag_review") and rule.matches(
+                component_type, component_name, object_key
+            ):
+                return rule
+        return None
 
     def type_override_map(self) -> dict[str, str]:
         return {item.source.upper(): item.target for item in self.type_overrides}

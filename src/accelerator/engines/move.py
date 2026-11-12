@@ -141,10 +141,14 @@ class MoveEngine:
                 )
                 ddl_sql = self.store.get_text(ddl_art.storage_uri) if ddl_art else None
 
+                target_tbl = self.registry.get_generator(cfg.require_target()).target_table(
+                    tbl_ir, cfg
+                )
                 load_run = LoadRun(
                     project_id=project_id,
                     object_key=obj.fqn,
                     mover_plugin=mover.manifest.name,
+                    target_table=f"{target_tbl.schema_name}.{target_tbl.name}",
                     mode=mode,
                     watermark_value=prev_watermark,
                     status="running",
@@ -171,6 +175,7 @@ class MoveEngine:
                     existing_completed_partitions=completed_parts,
                     staging_writer=_stage_partition,
                     target_ddl_sql=ddl_sql,
+                    target_table=target_tbl,
                 )
 
                 for part in outcome.partitions:

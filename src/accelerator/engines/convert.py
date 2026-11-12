@@ -174,26 +174,28 @@ class ConvertEngine:
                     compile_fail += 1
                     StateMachine.set_blocker(db, project_id, fqn, ddl_file.compile_log)
 
-            # Load accepted residue overrides from previous human decisions
-            accepted_decisions = (
+            # Reviewer decisions, keyed by the component's stable id; the latest decision wins.
+            # An approval without code means "accepted as not needed" and suppresses the item.
+            decisions = (
                 db.query(ReviewDecision)
                 .filter(
                     ReviewDecision.project_id == project_id,
-                    ReviewDecision.decision == "approved",
-                    ReviewDecision.replacement_code.isnot(None),
+                    ReviewDecision.component_key.isnot(None),
                 )
+                .order_by(ReviewDecision.created_at)
                 .all()
             )
             accepted_map: dict[str, dict[str, str]] = {}
-            for dec in accepted_decisions:
-                if dec.residue_item_id:
-                    r_item = (
-                        db.query(ResidueItem).filter(ResidueItem.id == dec.residue_item_id).first()
-                    )
-                    if r_item and dec.replacement_code:
-                        accepted_map.setdefault(dec.object_key, {})[r_item.component_name] = (
-                            dec.replacement_code
-                        )
+            for dec in decisions:
+                per_obj = accepted_map.setdefault(dec.object_key, {})
+                if dec.decision == "approved":
+                    per_obj[dec.component_key or ""] = dec.replacement_code or ""
+                else:
+                    per_obj.pop(dec.component_key or "", None)
+            kinds = {
+                s.object_key: s.object_kind
+                for s in db.query(ObjectStatus).filter(ObjectStatus.project_id == project_id)
+            }
 
             # Generate code from persisted Neutral IR flows (never raw files!)
             flows = db.query(IrFlow).filter(IrFlow.project_id == project_id).all()
@@ -226,6 +228,7 @@ class ConvertEngine:
                             conversion_run_id=run_row.id,
                             project_id=project_id,
                             object_key=flow.flow_key,
+                            component_key=res.component_key,
                             component_name=res.component_name,
                             reason_code=res.reason_code,
                             reason_detail=res.reason_detail,
@@ -235,7 +238,7 @@ class ConvertEngine:
                         )
                     )
 
-                obj_kind = "etl_job" if flow.etl_job_id else "view"
+                obj_kind = kinds.get(flow.flow_key, "etl_job" if flow.etl_job_id else "view")
                 if obj_residues == 0 and obj_compile_ok:
                     StateMachine.advance(
                         db,
@@ -430,6 +433,7 @@ class ConvertEngine:
             project_id=project_id,
             object_key=item.object_key,
             residue_item_id=item.id,
+            component_key=item.component_key or None,
             decision=decision,
             replacement_code=final_code,
             reviewer=actor,

@@ -158,15 +158,16 @@ def _l4_masked_row_diff(
     limit: int,
 ) -> dict[str, Any]:
     """Bounded L4 row-level diff with mandatory PII column masking."""
-    pk_cols = [c.name for c in table.columns if c.is_primary_key]
-    order_col = pk_cols[0] if pk_cols else (table.columns[0].name if table.columns else "1")
+    # Order by position, not name: the target table may use different column naming.
+    pk_pos = [i for i, c in enumerate(table.columns, start=1) if c.is_primary_key]
+    order_pos = pk_pos[0] if pk_pos else 1
     col_names = [c.name for c in table.columns]
 
     s_rows = conn_s.execute(
-        f'SELECT * FROM {ident_s} ORDER BY "{order_col}" LIMIT {limit * 5}'
+        f"SELECT * FROM {ident_s} ORDER BY {order_pos} LIMIT {limit * 5}"
     ).fetchall()
     t_rows = conn_t.execute(
-        f'SELECT * FROM {ident_t} ORDER BY "{order_col}" LIMIT {limit * 5}'
+        f"SELECT * FROM {ident_t} ORDER BY {order_pos} LIMIT {limit * 5}"
     ).fetchall()
 
     s_map = {str(r[0]): _json_safe(dict(zip(col_names, r, strict=False))) for r in s_rows}
@@ -223,7 +224,9 @@ class SqlPushdownValidator(Validator):
         source_uri: str,
         target_uri: str,
         config: ClientConfig,
+        target_table: TableIR | None = None,
     ) -> ValidationOutcome:
+        tt = target_table or table
         src_resolved = resolve_connection_uri(source_uri)
         tgt_resolved = resolve_connection_uri(target_uri)
         level = rule.level
@@ -232,9 +235,14 @@ class SqlPushdownValidator(Validator):
         kind_t, conn_t = _open_conn(tgt_resolved)
         try:
             ident_s = _table_ident(kind_s, conn_s, table)
-            ident_t = _table_ident(kind_t, conn_t, table)
+            ident_t = _table_ident(kind_t, conn_t, tt)
             src_metrics = _pushed_down_profile(kind_s, conn_s, ident_s, table, level)
-            tgt_metrics = _pushed_down_profile(kind_t, conn_t, ident_t, table, level)
+            tgt_metrics = _pushed_down_profile(kind_t, conn_t, ident_t, tt, level)
+            # Compare column-for-column by position: the target may rename columns.
+            rename = {t.name: s.name for s, t in zip(table.columns, tt.columns, strict=False)}
+            tgt_metrics["columns"] = {
+                rename.get(k, k): v for k, v in tgt_metrics.get("columns", {}).items()
+            }
 
             diffs: dict[str, Any] = {}
             within_tol = False

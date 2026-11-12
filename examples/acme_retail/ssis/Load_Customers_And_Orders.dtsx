@@ -56,17 +56,35 @@
                     <property name="FriendlyExpression">gross_amount &gt; 100</property>
                   </properties>
                 </output>
+                <output refId="split_default" name="Conditional Split Default Output" isDefaultOut="true"/>
               </outputs>
             </component>
             <component refId="lkp_cust" name="Lookup_Customer" componentClassID="Microsoft.Lookup">
               <properties>
-                <property name="OpenRowset">[dbo].[customers]</property>
+                <property name="SqlCommand">select * from [dbo].[customers]</property>
+                <property name="NoMatchBehavior">0</property>
               </properties>
               <inputs>
-                <input refId="lkp_in" name="Lookup Input"/>
+                <input refId="lkp_in" name="Lookup Input">
+                  <inputColumns>
+                    <inputColumn refId="lkp_in_cust" cachedName="customer_id">
+                      <properties>
+                        <property name="JoinToReferenceColumn">customer_id</property>
+                      </properties>
+                    </inputColumn>
+                  </inputColumns>
+                </input>
               </inputs>
               <outputs>
-                <output refId="lkp_out" name="Lookup Match Output"/>
+                <output refId="lkp_out" name="Lookup Match Output">
+                  <outputColumns>
+                    <outputColumn refId="lkp_out_seg" name="segment" dataType="str">
+                      <properties>
+                        <property name="CopyFromReferenceColumn">segment</property>
+                      </properties>
+                    </outputColumn>
+                  </outputColumns>
+                </output>
               </outputs>
             </component>
             <component refId="tgt_orders" name="OLEDB_Dest_Curated" componentClassID="Microsoft.OLEDBDestination">
@@ -74,7 +92,22 @@
                 <property name="OpenRowset">[dbo].[curated_orders]</property>
               </properties>
               <inputs>
-                <input refId="tgt_in" name="OLE DB Destination Input"/>
+                <input refId="tgt_in" name="OLE DB Destination Input">
+                  <inputColumns>
+                    <inputColumn refId="m1" cachedName="order_id" externalMetadataColumnId="x1"/>
+                    <inputColumn refId="m2" cachedName="customer_id" externalMetadataColumnId="x2"/>
+                    <inputColumn refId="m3" cachedName="segment" externalMetadataColumnId="x3"/>
+                    <inputColumn refId="m4" cachedName="gross_amount" externalMetadataColumnId="x4"/>
+                    <inputColumn refId="m5" cachedName="net_amount" externalMetadataColumnId="x5"/>
+                  </inputColumns>
+                  <externalMetadataColumns>
+                    <externalMetadataColumn refId="x1" name="order_id"/>
+                    <externalMetadataColumn refId="x2" name="customer_id"/>
+                    <externalMetadataColumn refId="x3" name="customer_segment"/>
+                    <externalMetadataColumn refId="x4" name="gross_amount"/>
+                    <externalMetadataColumn refId="x5" name="net_amount"/>
+                  </externalMetadataColumns>
+                </input>
               </inputs>
             </component>
           </components>

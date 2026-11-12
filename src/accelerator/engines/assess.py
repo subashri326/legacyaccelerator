@@ -200,7 +200,7 @@ class AssessEngine:
                     obj.fqn, kind, obj, ir_packages.get(obj.fqn), cfg
                 )
                 class_counts[classification] += 1
-                self._save_score_and_effort(
+                score_row = self._save_score_and_effort(
                     db,
                     project_id,
                     obj.fqn,
@@ -222,7 +222,7 @@ class AssessEngine:
                     ObjectState.ASSESSED,
                     actor,
                     "complexity_score",
-                    cfg_ver.id,
+                    score_row.id,
                 )
 
             for job in etl_jobs:
@@ -231,7 +231,7 @@ class AssessEngine:
                     job.job_name, "etl_job", None, ir_packages.get(job.job_name), cfg
                 )
                 class_counts[classification] += 1
-                self._save_score_and_effort(
+                score_row = self._save_score_and_effort(
                     db,
                     project_id,
                     job.job_name,
@@ -253,7 +253,7 @@ class AssessEngine:
                     ObjectState.ASSESSED,
                     actor,
                     "complexity_score",
-                    cfg_ver.id,
+                    score_row.id,
                 )
 
             # 4. Dependency-ordered Wave Planning (no wave ever depends on an unmigrated table!)
@@ -455,14 +455,11 @@ class AssessEngine:
                 if n.operator == NodeOperator.OPAQUE:
                     score += 35
                     reasons.append(f"Opaque component '{n.name}' ({n.source_component_type})")
-                for rule in cfg.custom_rules:
-                    if (
-                        rule.action == "flag_manual"
-                        and n.source_component_type.lower() in rule.match.lower()
-                    ):
-                        score += 40
-                        opaque_cnt += 1
-                        reasons.append(f"Client rule: {rule.reason}")
+                rule = cfg.matching_rule(n.source_component_type, n.name, object_key)
+                if rule is not None:
+                    score += 40 if rule.action == "flag_manual" else 20
+                    opaque_cnt += 1 if rule.action == "flag_manual" else 0
+                    reasons.append(f"Client rule: {rule.reason}")
                 for expr in n.expressions:
                     if expr.is_opaque:
                         score += 15
@@ -473,12 +470,12 @@ class AssessEngine:
             if t.task_type == "opaque":
                 score += 40
                 reasons.append(f"Manual task '{t.name}'")
-            for rule in cfg.custom_rules:
-                if rule.action == "flag_manual" and (
-                    t.task_type.lower() in rule.match.lower()
-                    or ("scripttask" in rule.match.lower() and t.task_type == "opaque")
-                ):
-                    reasons.append(f"Client rule: {rule.reason}")
+            t_type = t.opaque.component_type if t.opaque else t.task_type
+            rule = cfg.matching_rule(t_type, t.name, object_key)
+            if rule is not None:
+                score += 40 if rule.action == "flag_manual" else 20
+                opaque_cnt += 1 if rule.action == "flag_manual" else 0
+                reasons.append(f"Client rule: {rule.reason}")
 
         if db_obj and obj_has_proc_complexity(db_obj.definition_sql or ""):
             score += 35
@@ -506,20 +503,20 @@ class AssessEngine:
         cfg_ver_id: str,
         effort_totals: dict[str, float],
         actor: str,
-    ) -> None:
-        db.add(
-            ComplexityScore(
-                project_id=project_id,
-                object_key=object_key,
-                object_kind=object_kind,
-                score=score,
-                classification=classification,
-                opaque_count=opaque_cnt,
-                reasons=reasons,
-                config_version_id=cfg_ver_id,
-                created_by=actor,
-            )
+    ) -> ComplexityScore:
+        score_row = ComplexityScore(
+            project_id=project_id,
+            object_key=object_key,
+            object_kind=object_kind,
+            score=score,
+            classification=classification,
+            opaque_count=opaque_cnt,
+            reasons=reasons,
+            config_version_id=cfg_ver_id,
+            created_by=actor,
         )
+        db.add(score_row)
+        db.flush()
         base_days = {
             "auto_convertible": cfg.effort_rates.auto_convertible_days,
             "needs_review": cfg.effort_rates.needs_review_days,
@@ -544,6 +541,7 @@ class AssessEngine:
                     created_by=actor,
                 )
             )
+        return score_row
 
     def _build_waves(
         self,

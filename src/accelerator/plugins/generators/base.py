@@ -9,13 +9,20 @@ import yaml
 from sqlglot.errors import SqlglotError
 
 from accelerator.config.client_config import ClientConfig
-from accelerator.ir.expressions import DIALECT_MAP, ExpressionConverter
+from accelerator.ir.expressions import DIALECT_MAP
 from accelerator.ir.models import (
     DataFlowGraphIR,
-    NodeIR,
     NodeOperator,
+    OpaqueSnippetIR,
     PackageIR,
     TableIR,
+)
+from accelerator.plugins.generators.flow_sql import (
+    FlowSqlBuilder,
+    GeneratedModel,
+    GeneratedStep,
+    SqlRenderer,
+    render_sql_tasks,
 )
 from accelerator.plugins.interfaces import (
     GeneratedBundle,
@@ -130,6 +137,19 @@ class BaseTargetGenerator(TargetGenerator):
             return value.lower()
         return value
 
+    def target_table(self, table: TableIR, config: ClientConfig) -> TableIR:
+        return table.model_copy(
+            update={
+                "database": "",
+                "schema_name": self.resolve_schema(table, config),
+                "name": self.resolve_table_name(table.name, config),
+                "columns": [
+                    c.model_copy(update={"name": self.resolve_column_name(c.name, config)})
+                    for c in table.columns
+                ],
+            }
+        )
+
     def map_data_type(self, source_type: str, config: ClientConfig) -> str:
         overrides = config.type_override_map()
         base_token = re.split(r"[\(\s]", source_type.strip().upper())[0]
@@ -188,257 +208,6 @@ class BaseTargetGenerator(TargetGenerator):
             compile_log=log,
         )
 
-    def _matches_custom_manual_rule(self, component_type: str, config: ClientConfig) -> str | None:
-        for rule in config.custom_rules:
-            if rule.action in ("flag_manual", "flag_review") and (
-                component_type.lower() in rule.match.lower() or f"'{component_type}'" in rule.match
-            ):
-                return rule.reason
-        return None
-
-    def _flow_to_sql_ctes(
-        self,
-        df: DataFlowGraphIR,
-        config: ClientConfig,
-        accepted_overrides: dict[str, str] | None = None,
-    ) -> tuple[str, list[GeneratedResidue]]:
-        """Render a Neutral DataFlowGraphIR into target SQL using topological CTEs."""
-        residues: list[GeneratedResidue] = []
-        accepted = accepted_overrides or {}
-
-        node_map = {n.id: n for n in df.nodes}
-        upstream_map: dict[str, list[str]] = {n.id: [] for n in df.nodes}
-        for edge in df.edges:
-            if edge.target_node_id in upstream_map:
-                upstream_map[edge.target_node_id].append(edge.source_node_id)
-
-        # Topological sort (fallback to input order on cycles)
-        ordered: list[NodeIR] = []
-        visited: set[str] = set()
-
-        def visit(nid: str) -> None:
-            if nid in visited or nid not in node_map:
-                return
-            visited.add(nid)
-            for up in upstream_map.get(nid, []):
-                visit(up)
-            ordered.append(node_map[nid])
-
-        for n in df.nodes:
-            visit(n.id)
-
-        cte_names: dict[str, str] = {}
-        ctes: list[str] = []
-
-        for idx, node in enumerate(ordered, start=1):
-            cte_name = re.sub(r"[^a-zA-Z0-9_]", "_", f"cte_{idx}_{node.name.lower()}").strip("_")
-            ups = [cte_names[u] for u in upstream_map.get(node.id, []) if u in cte_names]
-            prev_cte = ups[0] if ups else "dual"
-
-            custom_reason = self._matches_custom_manual_rule(node.source_component_type, config)
-            if node.operator == NodeOperator.OPAQUE or custom_reason:
-                if node.id in accepted:
-                    cte_names[node.id] = cte_name
-                    ctes.append(
-                        f"{cte_name} AS (\n    -- Human-accepted replacement\n    {accepted[node.id]}\n)"
-                    )
-                else:
-                    snippet = (
-                        node.opaque.original_snippet
-                        if node.opaque
-                        else f"{node.name} ({node.source_component_type})"
-                    )
-                    reason_code = node.opaque.reason_code if node.opaque else "CUSTOM_RULE_MANUAL"
-                    reason_detail = custom_reason or (
-                        node.opaque.reason_detail if node.opaque else "Flagged for manual review"
-                    )
-                    residues.append(
-                        GeneratedResidue(
-                            object_key=df.id,
-                            component_name=node.name,
-                            reason_code=reason_code,
-                            reason_detail=reason_detail,
-                            original_snippet=snippet,
-                        )
-                    )
-                    cte_names[node.id] = prev_cte
-                continue
-
-            if node.operator == NodeOperator.SOURCE:
-                tbl = (node.table_ref or node.name).replace("[", "").replace("]", "")
-                if node.sql_query:
-                    try:
-                        rendered_src, _ = ExpressionConverter.transpile_sql(
-                            node.sql_query, "tsql", self.platform
-                        )
-                        body = rendered_src.rstrip(";")
-                    except (SqlglotError, ValueError):
-                        body = f"SELECT * FROM {tbl}"
-                elif config.target.output == "dbt":
-                    src_tbl = tbl.split(".")[-1].lower()
-                    body = f"SELECT * FROM {{{{ source('legacy', '{src_tbl}') }}}}"
-                else:
-                    body = f"SELECT * FROM {tbl}"
-                cte_names[node.id] = cte_name
-                ctes.append(f"{cte_name} AS (\n    {body}\n)")
-
-            elif node.operator == NodeOperator.FILTER:
-                cond_sql = "1 = 1"
-                if node.condition and node.condition.neutral_sql:
-                    cond_sql = ExpressionConverter.render_target(
-                        node.condition.neutral_sql, self.platform
-                    )
-                elif node.condition and node.condition.is_opaque:
-                    residues.append(
-                        GeneratedResidue(
-                            object_key=df.id,
-                            component_name=node.name,
-                            reason_code="EXPRESSION_OPAQUE",
-                            reason_detail=node.condition.opaque_reason
-                            or "Unparsed filter expression",
-                            original_snippet=node.condition.original_expr,
-                        )
-                    )
-                cte_names[node.id] = cte_name
-                ctes.append(f"{cte_name} AS (\n    SELECT * FROM {prev_cte} WHERE {cond_sql}\n)")
-
-            elif node.operator == NodeOperator.EXPRESSION:
-                proj: list[str] = ["*"]
-                for expr in node.expressions:
-                    col_alias = self.resolve_column_name(
-                        expr.target_column or "derived_col", config
-                    )
-                    if expr.is_opaque:
-                        residues.append(
-                            GeneratedResidue(
-                                object_key=df.id,
-                                component_name=f"{node.name}.{col_alias}",
-                                reason_code="EXPRESSION_OPAQUE",
-                                reason_detail=expr.opaque_reason or "Unparsed derived expression",
-                                original_snippet=expr.original_expr,
-                            )
-                        )
-                        proj.append(f"NULL AS {col_alias} /* TODO: {expr.original_expr} */")
-                    else:
-                        rendered = ExpressionConverter.render_target(
-                            expr.neutral_sql, self.platform
-                        )
-                        proj.append(f"{rendered} AS {col_alias}")
-                cte_names[node.id] = cte_name
-                ctes.append(f"{cte_name} AS (\n    SELECT {', '.join(proj)} FROM {prev_cte}\n)")
-
-            elif node.operator in (NodeOperator.JOIN, NodeOperator.LOOKUP):
-                right_cte = ups[1] if len(ups) > 1 else (node.table_ref or "lookup_ref")
-                join_kw = f"{(node.join_type or 'LEFT').upper()} JOIN"
-                keys = node.join_keys or [{"left": "id", "right": "id"}]
-                on_clause = " AND ".join(f"l.{k['left']} = r.{k['right']}" for k in keys)
-                cte_names[node.id] = cte_name
-                ctes.append(
-                    f"{cte_name} AS (\n    SELECT l.* FROM {prev_cte} l\n    {join_kw} {right_cte} r ON {on_clause}\n)"
-                )
-
-            elif node.operator == NodeOperator.AGGREGATE:
-                grp = ", ".join(node.group_by_columns) if node.group_by_columns else "1"
-                cte_names[node.id] = cte_name
-                ctes.append(
-                    f"{cte_name} AS (\n    SELECT {grp}, COUNT(*) AS _row_cnt FROM {prev_cte} GROUP BY {grp}\n)"
-                )
-
-            elif node.operator == NodeOperator.UNION and len(ups) >= 2:
-                union_sql = "\n    UNION ALL\n    ".join(f"SELECT * FROM {u}" for u in ups)
-                cte_names[node.id] = cte_name
-                ctes.append(f"{cte_name} AS (\n    {union_sql}\n)")
-
-            elif node.operator == NodeOperator.DEDUPLICATE:
-                keys = ", ".join(node.dedup_keys) if node.dedup_keys else "1"
-                cte_names[node.id] = cte_name
-                ctes.append(
-                    f"{cte_name} AS (\n    SELECT * FROM (\n"
-                    f"        SELECT *, ROW_NUMBER() OVER (PARTITION BY {keys} ORDER BY {keys}) AS _rn FROM {prev_cte}\n"
-                    f"    ) d WHERE _rn = 1\n)"
-                )
-
-            elif node.operator == NodeOperator.ROUTER:
-                route_cases = []
-                for r in node.routes:
-                    cond = r.get("condition") or "1=1"
-                    route_cases.append(f"WHEN {cond} THEN '{r.get('name', 'route')}'")
-                case_expr = (
-                    f"CASE {' '.join(route_cases)} ELSE 'default' END AS _route_branch"
-                    if route_cases
-                    else "'default' AS _route_branch"
-                )
-                cte_names[node.id] = cte_name
-                ctes.append(f"{cte_name} AS (\n    SELECT *, {case_expr} FROM {prev_cte}\n)")
-
-            elif node.operator == NodeOperator.TARGET:
-                cte_names[node.id] = prev_cte
-
-            else:
-                cte_names[node.id] = prev_cte
-
-        if not ctes:
-            return "SELECT 1 AS empty_flow;\n", residues
-
-        final_cte = list(cte_names.values())[-1]
-        for n in reversed(ordered):
-            if n.operator == NodeOperator.TARGET and n.id in cte_names:
-                final_cte = cte_names[n.id]
-                break
-
-        sql_out = "WITH " + ",\n".join(ctes) + f"\nSELECT * FROM {final_cte};\n"
-        return sql_out, residues
-
-    def _build_dbt_schema_files(
-        self,
-        model_names: list[str],
-        tables: dict[str, TableIR],
-        config: ClientConfig,
-    ) -> list[GeneratedFile]:
-        sources_yaml = {
-            "version": 2,
-            "sources": [
-                {
-                    "name": "legacy",
-                    "database": config.target.database,
-                    "schema": config.naming.layer_default,
-                    "tables": [
-                        {
-                            "name": t.name.lower(),
-                            "description": f"Migrated source table {t.fqn}",
-                            "columns": [{"name": c.name.lower()} for c in t.columns],
-                        }
-                        for t in tables.values()
-                    ],
-                }
-            ],
-        }
-        models_yaml = {
-            "version": 2,
-            "models": [
-                {
-                    "name": m,
-                    "description": f"L2C generated dbt model for {m}",
-                    "config": {"materialized": "table"},
-                }
-                for m in model_names
-            ],
-        }
-        return [
-            GeneratedFile(
-                relative_path="dbt/models/sources.yml",
-                artifact_kind="dbt_schema",
-                content=yaml.safe_dump(sources_yaml, sort_keys=False),
-                object_key="dbt_project",
-            ),
-            GeneratedFile(
-                relative_path="dbt/models/schema.yml",
-                artifact_kind="dbt_schema",
-                content=yaml.safe_dump(models_yaml, sort_keys=False),
-                object_key="dbt_project",
-            ),
-        ]
-
     def generate_package(
         self,
         package: PackageIR,
@@ -446,79 +215,151 @@ class BaseTargetGenerator(TargetGenerator):
         config: ClientConfig,
         accepted_overrides: dict[str, str] | None = None,
     ) -> GeneratedBundle:
-        files: list[GeneratedFile] = []
+        """Convert one parsed package. Anything that can't be converted exactly becomes a residue."""
+        accepted = accepted_overrides or {}
+        renderer = SqlRenderer(self, config, tables)
         residues: list[GeneratedResidue] = []
-        model_names: list[str] = []
+        models: list[GeneratedModel] = []
+        steps: list[GeneratedStep] = []
 
-        # Evaluate custom rules at task level as well
         for task in package.tasks:
-            custom_reason = self._matches_custom_manual_rule(task.task_type, config)
-            if (task.task_type == "opaque" or custom_reason) and task.id not in (
-                accepted_overrides or {}
-            ):
+            rule = config.matching_rule(
+                task.opaque.component_type if task.opaque else task.task_type, task.name, package.id
+            )
+            if (task.task_type == "opaque" or rule) and task.id not in accepted:
                 residues.append(
                     GeneratedResidue(
                         object_key=package.id,
                         component_name=task.name,
-                        reason_code=task.opaque.reason_code if task.opaque else "TASK_MANUAL_RULE",
-                        reason_detail=custom_reason
+                        reason_code=task.opaque.reason_code if task.opaque else "CUSTOM_RULE",
+                        reason_detail=(rule.reason if rule else "")
                         or (task.opaque.reason_detail if task.opaque else "Manual task"),
                         original_snippet=task.opaque.original_snippet
                         if task.opaque
                         else (task.sql_statement or task.name),
+                        component_key=task.id,
                     )
                 )
 
-        for df in package.data_flows:
-            sql_body, df_res = self._flow_to_sql_ctes(df, config, accepted_overrides)
-            for r in df_res:
-                r.object_key = package.id
-            residues.extend(df_res)
+        sql_tools = {"tsql", "plsql", "bteq", "sql"}
+        read = "neutral" if package.source_tool in sql_tools else "tsql"
+        sql_result = render_sql_tasks(renderer, package, read, accepted)
+        models += sql_result.models
+        steps += sql_result.steps
+        residues += sql_result.residues
 
-            safe_name = re.sub(r"[^a-zA-Z0-9_]+", "_", df.name.lower()).strip("_")
-            model_names.append(safe_name)
+        if package.source_tool not in sql_tools:  # SQL scripts are fully covered by their tasks
+            for df in package.data_flows:
+                forced = {}
+                for n in df.nodes:
+                    rule = config.matching_rule(n.source_component_type, n.name, package.id)
+                    if rule:
+                        forced[n.id] = rule.reason
+                flow_pkg = package.model_copy(update={"data_flows": [df]})
+                builder = FlowSqlBuilder(renderer, flow_pkg, _force_opaque(df, forced), accepted)
+                models += builder.build()
+                residues += builder.residues
 
+        files: list[GeneratedFile] = []
+        header = f"-- Source: {package.source_tool} :: {package.name}\n"
+        for m in models:
             if config.target.output == "dbt":
-                model_content = (
-                    f"{{{{ config(materialized='table') }}}}\n"
-                    f"-- Source: {package.source_tool} :: {package.name} / {df.name}\n"
-                    + sql_body.rstrip(";\n")
-                    + "\n"
-                )
-                # Strip dbt config blocks to empty and source/ref Jinja tags to placeholder table
-                check_sql = re.sub(r"\{\{\s*config\([^}]+\)\s*\}\}", "", model_content)
+                content = f"{{{{ config(materialized='table') }}}}\n{header}{m.sql.rstrip(';')}\n"
+                check_sql = re.sub(r"\{\{\s*config\([^}]+\)\s*\}\}", "", content)
                 check_sql = re.sub(r"\{\{[^}]+\}\}", "legacy_table", check_sql)
                 ok, log = self.compile_check(check_sql, "dbt_model")
                 files.append(
                     GeneratedFile(
-                        relative_path=f"dbt/models/{safe_name}.sql",
-                        artifact_kind="dbt_model",
-                        content=model_content,
-                        object_key=package.id,
-                        compile_passed=ok,
-                        compile_log=log,
+                        f"dbt/models/{m.name}.sql", "dbt_model", content, package.id, ok, log
                     )
                 )
             else:
-                ok, log = self.compile_check(sql_body, "sql")
+                content = f"{header}{m.sql.rstrip(';')};\n"
+                ok, log = self.compile_check(content, "sql")
                 files.append(
                     GeneratedFile(
-                        relative_path=f"sql/{self.platform}/{safe_name}.sql",
-                        artifact_kind="sql",
-                        content=sql_body,
-                        object_key=package.id,
-                        compile_passed=ok,
-                        compile_log=log,
+                        f"sql/{self.platform}/{m.name}.sql", "sql", content, package.id, ok, log
                     )
                 )
+        for st in steps:
+            content = f"{header}{st.sql.rstrip(';')};\n"
+            check = re.sub(r"\{\{[^}]+\}\}", "legacy_table", content)
+            ok, log = self.compile_check(check, "sql")
+            files.append(
+                GeneratedFile(
+                    f"sql/{self.platform}/steps/{st.name}.sql",
+                    "sql_step",
+                    content,
+                    package.id,
+                    ok,
+                    log,
+                )
+            )
 
+        model_names = [m.name for m in models]
         if config.target.output == "dbt" and model_names:
             files.extend(self._build_dbt_schema_files(model_names, tables, config))
-
-        # Platform-specific orchestration output (Tasks / Lakeflow / Data Factory)
-        orch_files = self._generate_orchestration(package, model_names, config)
-        files.extend(orch_files)
+        files.extend(self._generate_orchestration(package, model_names, config))
         return GeneratedBundle(files=files, residues=residues)
+
+    def _build_dbt_schema_files(
+        self,
+        model_names: list[str],
+        tables: dict[str, TableIR],
+        config: ClientConfig,
+    ) -> list[GeneratedFile]:
+        """dbt sources point at the migrated tables, under the schema/table names the DDL creates."""
+        by_schema: dict[str, list[TableIR]] = {}
+        for t in tables.values():
+            by_schema.setdefault(self.resolve_schema(t, config), []).append(t)
+        sources_yaml = {
+            "version": 2,
+            "sources": [
+                {
+                    "name": schema.lower(),
+                    "database": config.target.database,
+                    "schema": schema,
+                    "tables": [
+                        {
+                            "name": self.resolve_table_name(t.name, config).lower(),
+                            "identifier": self.resolve_table_name(t.name, config),
+                            "description": f"Migrated from {t.fqn}",
+                            "columns": [
+                                {"name": self.resolve_column_name(c.name, config)}
+                                for c in t.columns
+                            ],
+                        }
+                        for t in sorted(group, key=lambda x: x.name)
+                    ],
+                }
+                for schema, group in sorted(by_schema.items())
+            ],
+        }
+        models_yaml = {
+            "version": 2,
+            "models": [
+                {
+                    "name": m,
+                    "description": f"L2C generated model {m}",
+                    "config": {"materialized": "table"},
+                }
+                for m in model_names
+            ],
+        }
+        return [
+            GeneratedFile(
+                "dbt/models/sources.yml",
+                "dbt_schema",
+                yaml.safe_dump(sources_yaml, sort_keys=False),
+                "dbt_project",
+            ),
+            GeneratedFile(
+                "dbt/models/schema.yml",
+                "dbt_schema",
+                yaml.safe_dump(models_yaml, sort_keys=False),
+                "dbt_project",
+            ),
+        ]
 
     def _generate_orchestration(
         self,
@@ -544,3 +385,27 @@ class BaseTargetGenerator(TargetGenerator):
             return True, f"sqlglot compile check passed ({len(stmts)} statement(s) in {dialect})"
         except (SqlglotError, ValueError) as exc:
             return False, f"Compile check failed ({self.sqlglot_dialect}): {exc}"
+
+
+def _force_opaque(df: DataFlowGraphIR, forced: dict[str, str]) -> DataFlowGraphIR:
+    """Mark nodes hit by a client 'flag_manual/flag_review' rule as opaque so they go to review."""
+    if not forced:
+        return df
+    nodes = []
+    for n in df.nodes:
+        if n.id in forced and n.operator != NodeOperator.OPAQUE:
+            n = n.model_copy(
+                update={
+                    "operator": NodeOperator.OPAQUE,
+                    "opaque": OpaqueSnippetIR(
+                        node_id=n.id,
+                        component_name=n.name,
+                        component_type=n.source_component_type,
+                        reason_code="CUSTOM_RULE",
+                        reason_detail=forced[n.id],
+                        original_snippet=n.name,
+                    ),
+                }
+            )
+        nodes.append(n)
+    return df.model_copy(update={"nodes": nodes})
