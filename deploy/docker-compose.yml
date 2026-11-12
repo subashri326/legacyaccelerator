@@ -1,0 +1,73 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: l2c
+      POSTGRES_PASSWORD: l2c_dev_password
+      POSTGRES_DB: l2c_metadata
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ../sql/postgres_ddl.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin_secret
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+
+  api:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.backend
+    environment:
+      L2C_DATABASE_URL: postgresql+psycopg2://l2c:l2c_dev_password@postgres:5432/l2c_metadata
+      L2C_STORAGE_BACKEND: s3
+      L2C_S3_BUCKET: l2c-artifacts
+      L2C_S3_ENDPOINT_URL: http://minio:9000
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin_secret
+    ports:
+      - "8000:8000"
+    depends_on:
+      - postgres
+      - minio
+
+  streamlit:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.backend
+    command: ["streamlit", "run", "src/accelerator/ui/streamlit_app.py", "--server.address=0.0.0.0", "--server.port=8501"]
+    environment:
+      L2C_DATABASE_URL: postgresql+psycopg2://l2c:l2c_dev_password@postgres:5432/l2c_metadata
+    ports:
+      - "8501:8501"
+    depends_on:
+      - postgres
+
+  frontend:
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile
+    ports:
+      - "3000:80"
+    depends_on:
+      - api
+
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+
+volumes:
+  pg_data:
+  minio_data:

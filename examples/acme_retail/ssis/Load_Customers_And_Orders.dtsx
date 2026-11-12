@@ -1,0 +1,111 @@
+<?xml version="1.0"?>
+<DTS:Executable xmlns:DTS="www.microsoft.com/SqlServer/Dts"
+                xmlns:SQLTask="www.microsoft.com/sqlserver/dts/tasks/sqltask"
+                DTS:ObjectName="Load_Customers_And_Orders">
+  <DTS:Variables>
+    <DTS:Variable DTS:Namespace="User" DTS:ObjectName="BatchDate">
+      <DTS:VariableValue>2026-11-11</DTS:VariableValue>
+    </DTS:Variable>
+  </DTS:Variables>
+  <DTS:Executables>
+    <DTS:Executable DTS:ExecutableType="Microsoft.ExecuteSQLTask"
+                    DTS:ObjectName="SQL_Truncate_Staging"
+                    DTS:DTSID="{A1111111-1111-1111-1111-111111111111}">
+      <DTS:ObjectData>
+        <SQLTask:SqlTaskData SQLTask:SqlStatementSource="TRUNCATE TABLE dbo.stg_orders;"/>
+      </DTS:ObjectData>
+    </DTS:Executable>
+
+    <DTS:Executable DTS:ExecutableType="Microsoft.Pipeline"
+                    DTS:ObjectName="DF_Load_Orders"
+                    DTS:DTSID="{B2222222-2222-2222-2222-222222222222}">
+      <DTS:ObjectData>
+        <pipeline>
+          <components>
+            <component refId="src_orders" name="OLEDB_Src_Orders" componentClassID="Microsoft.OLEDBSource">
+              <properties>
+                <property name="OpenRowset">[dbo].[orders]</property>
+              </properties>
+              <outputs>
+                <output refId="src_orders_out" name="OLE DB Source Output"/>
+              </outputs>
+            </component>
+            <component refId="drv_net" name="Derived_Net_Amount" componentClassID="Microsoft.DerivedColumn">
+              <inputs>
+                <input refId="drv_net_in" name="Derived Column Input"/>
+              </inputs>
+              <outputs>
+                <output refId="drv_net_out" name="Derived Column Output">
+                  <outputColumns>
+                    <outputColumn name="net_amount" dataType="numeric">
+                      <properties>
+                        <property name="FriendlyExpression">gross_amount - (ISNULL(discount) ? 0 : discount)</property>
+                      </properties>
+                    </outputColumn>
+                  </outputColumns>
+                </output>
+              </outputs>
+            </component>
+            <component refId="split_high" name="Split_High_Value" componentClassID="Microsoft.ConditionalSplit">
+              <inputs>
+                <input refId="split_in" name="Conditional Split Input"/>
+              </inputs>
+              <outputs>
+                <output refId="split_out" name="HighValueOrders">
+                  <properties>
+                    <property name="FriendlyExpression">gross_amount &gt; 100</property>
+                  </properties>
+                </output>
+              </outputs>
+            </component>
+            <component refId="lkp_cust" name="Lookup_Customer" componentClassID="Microsoft.Lookup">
+              <properties>
+                <property name="OpenRowset">[dbo].[customers]</property>
+              </properties>
+              <inputs>
+                <input refId="lkp_in" name="Lookup Input"/>
+              </inputs>
+              <outputs>
+                <output refId="lkp_out" name="Lookup Match Output"/>
+              </outputs>
+            </component>
+            <component refId="tgt_orders" name="OLEDB_Dest_Curated" componentClassID="Microsoft.OLEDBDestination">
+              <properties>
+                <property name="OpenRowset">[dbo].[curated_orders]</property>
+              </properties>
+              <inputs>
+                <input refId="tgt_in" name="OLE DB Destination Input"/>
+              </inputs>
+            </component>
+          </components>
+          <paths>
+            <path refId="p1" startId="src_orders_out" endId="drv_net_in"/>
+            <path refId="p2" startId="drv_net_out" endId="split_in"/>
+            <path refId="p3" startId="split_out" endId="lkp_in"/>
+            <path refId="p4" startId="lkp_out" endId="tgt_in"/>
+          </paths>
+        </pipeline>
+      </DTS:ObjectData>
+    </DTS:Executable>
+
+    <DTS:Executable DTS:ExecutableType="Microsoft.ScriptTask"
+                    DTS:ObjectName="Script_Notify_ERP_Webhook"
+                    DTS:DTSID="{C3333333-3333-3333-3333-333333333333}">
+      <DTS:ObjectData>
+        <ScriptProject Name="ERPWebhookNotifier">
+          // Custom C# ScriptTask calling legacy internal ERP webhook
+          public void Main() { Dts.TaskResult = (int)ScriptResults.Success; }
+        </ScriptProject>
+      </DTS:ObjectData>
+    </DTS:Executable>
+  </DTS:Executables>
+
+  <DTS:PrecedenceConstraints>
+    <DTS:PrecedenceConstraint DTS:From="{A1111111-1111-1111-1111-111111111111}"
+                              DTS:To="{B2222222-2222-2222-2222-222222222222}"
+                              DTS:Value="0"/>
+    <DTS:PrecedenceConstraint DTS:From="{B2222222-2222-2222-2222-222222222222}"
+                              DTS:To="{C3333333-3333-3333-3333-333333333333}"
+                              DTS:Value="0"/>
+  </DTS:PrecedenceConstraints>
+</DTS:Executable>

@@ -1,0 +1,6 @@
+object_fqn,reads_30d
+legacy_ddl.dbo.customers,1450
+legacy_ddl.dbo.products,980
+legacy_ddl.dbo.orders,5210
+legacy_ddl.finance.gl_entries,870
+legacy_ddl.dbo.unused_temp_log,0

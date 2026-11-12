@@ -1,0 +1,28 @@
+<?xml version="1.0"?>
+<POWERMART>
+  <REPOSITORY NAME="PROD_REPO">
+    <FOLDER NAME="ACME_FINANCE">
+      <SOURCE NAME="orders">
+        <SOURCEFIELD NAME="order_id" DATATYPE="integer"/>
+        <SOURCEFIELD NAME="gross_amount" DATATYPE="decimal"/>
+      </SOURCE>
+      <TARGET NAME="gl_entries">
+        <TARGETFIELD NAME="entry_id" DATATYPE="integer"/>
+        <TARGETFIELD NAME="debit_amount" DATATYPE="decimal"/>
+      </TARGET>
+      <MAPPING NAME="m_orders_to_gl">
+        <TRANSFORMATION NAME="EXP_GL_CALC" TYPE="Expression">
+          <TRANSFORMFIELD NAME="net_amt" DATATYPE="decimal" EXPRESSION="IIF(ISNULL(gross_amount), 0, gross_amount)"/>
+        </TRANSFORMATION>
+        <INSTANCE NAME="orders" TRANSFORMATION_NAME="orders" TYPE="SOURCE" TRANSFORMATION_TYPE="Source Definition"/>
+        <INSTANCE NAME="EXP_GL_CALC" TRANSFORMATION_NAME="EXP_GL_CALC" TYPE="TRANSFORMATION" TRANSFORMATION_TYPE="Expression"/>
+        <INSTANCE NAME="gl_entries" TRANSFORMATION_NAME="gl_entries" TYPE="TARGET" TRANSFORMATION_TYPE="Target Definition"/>
+        <CONNECTOR FROMINSTANCE="orders" FROMFIELD="order_id" TOINSTANCE="EXP_GL_CALC" TOFIELD="order_id"/>
+        <CONNECTOR FROMINSTANCE="EXP_GL_CALC" FROMFIELD="order_id" TOINSTANCE="gl_entries" TOFIELD="entry_id"/>
+      </MAPPING>
+      <WORKFLOW NAME="wf_orders_export">
+        <TASKINSTANCE NAME="s_m_orders_to_gl" TASKNAME="m_orders_to_gl" TASKTYPE="Session"/>
+      </WORKFLOW>
+    </FOLDER>
+  </REPOSITORY>
+</POWERMART>

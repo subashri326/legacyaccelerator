@@ -1,0 +1,24 @@
+replicaCount: 2
+
+image:
+  apiRepository: ghcr.io/acme/l2c-accelerator-api
+  uiRepository: ghcr.io/acme/l2c-accelerator-ui
+  tag: "0.1.0"
+  pullPolicy: IfNotPresent
+
+service:
+  apiPort: 8000
+  uiPort: 80
+
+config:
+  databaseUrl: "postgresql+psycopg2://l2c:REPLACE_ME@postgres:5432/l2c_metadata"
+  storageBackend: "s3"
+  s3Bucket: "client-l2c-artifacts"
+  vaultBackend: "hashicorp"
+  authMode: "oidc"
+  oidcIssuer: "https://login.microsoftonline.com/<tenant-id>/v2.0"
+  aiEnabled: "false"
+
+secrets:
+  jwtSecret: "REPLACE_WITH_32_BYTE_SECRET"
+  hashicorpVaultToken: "REPLACE_WITH_VAULT_TOKEN"

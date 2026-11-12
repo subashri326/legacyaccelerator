@@ -1,0 +1,26 @@
+<?xml version="1.0"?>
+<DTS:Executable xmlns:DTS="www.microsoft.com/SqlServer/Dts" DTS:ObjectName="Load_Finance_GL">
+  <DTS:Executables>
+    <DTS:Executable DTS:ExecutableType="Microsoft.Pipeline"
+                    DTS:ObjectName="DF_Load_GL_Entries"
+                    DTS:DTSID="{D4444444-4444-4444-4444-444444444444}">
+      <DTS:ObjectData>
+        <pipeline>
+          <components>
+            <component refId="src_ord" name="Src_Orders" componentClassID="Microsoft.OLEDBSource">
+              <properties><property name="OpenRowset">[dbo].[orders]</property></properties>
+              <outputs><output refId="src_ord_out" name="Out"/></outputs>
+            </component>
+            <component refId="tgt_gl" name="Dest_GL" componentClassID="Microsoft.OLEDBDestination">
+              <properties><property name="OpenRowset">[finance].[gl_entries]</property></properties>
+              <inputs><input refId="tgt_gl_in" name="In"/></inputs>
+            </component>
+          </components>
+          <paths>
+            <path refId="p_gl" startId="src_ord_out" endId="tgt_gl_in"/>
+          </paths>
+        </pipeline>
+      </DTS:ObjectData>
+    </DTS:Executable>
+  </DTS:Executables>
+</DTS:Executable>

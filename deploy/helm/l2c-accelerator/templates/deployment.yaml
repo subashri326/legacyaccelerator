@@ -1,0 +1,53 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-api
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}-api
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}-api
+    spec:
+      containers:
+        - name: api
+          image: "{{ .Values.image.apiRepository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: {{ .Release.Name }}-config
+            - secretRef:
+                name: {{ .Release.Name }}-secrets
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8000
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-ui
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}-ui
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}-ui
+    spec:
+      containers:
+        - name: ui
+          image: "{{ .Values.image.uiRepository }}:{{ .Values.image.tag }}"
+          ports:
+            - containerPort: 80
