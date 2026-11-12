@@ -75,6 +75,7 @@ class ConvertEngine:
     ) -> ConvertSummary:
         with metrics.stage_span("convert", project_id):
             cfg_ver, cfg = get_active_config(db, project_id)
+            cfg.require_target()
             gen_key = generator_name or cfg.target.platform
             generator = self.registry.get_generator(gen_key)
 

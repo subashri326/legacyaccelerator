@@ -95,7 +95,7 @@ class AssessEngine:
                 pkg.id = job.job_name
                 pkg.name = job.job_name
                 ir_packages[job.job_name] = pkg
-                self._persist_ir_and_components(db, project_id, job, None, pkg, actor)
+                self._persist_ir_and_components(db, project_id, job, None, pkg, actor, art.id, art.content_hash)
 
             for obj in db_objects:
                 if obj.object_type in ("VIEW", "PROCEDURE") and obj.definition_sql:
@@ -107,7 +107,9 @@ class AssessEngine:
                     pkg.id = obj.fqn
                     pkg.name = obj.fqn
                     ir_packages[obj.fqn] = pkg
-                    self._persist_ir_and_components(db, project_id, None, obj, pkg, actor)
+                    self._persist_ir_and_components(
+                        db, project_id, None, obj, pkg, actor, obj.source_artifact_id, obj.content_hash
+                    )
 
             # 2. Build cross-tool Lineage Graph (tables, views, procedures, ETL jobs)
             graph = nx.DiGraph()
@@ -258,6 +260,8 @@ class AssessEngine:
         db_obj: DbObject | None,
         pkg: PackageIR,
         actor: str,
+        source_artifact_id: str | None = None,
+        source_content_hash: str = "",
     ) -> None:
         if etl_job is not None:
             db.query(EtlComponent).filter(EtlComponent.etl_job_id == etl_job.id).delete()
@@ -299,6 +303,8 @@ class AssessEngine:
             flow_key=pkg.id,
             name=pkg.name,
             source_tool=pkg.source_tool,
+            source_artifact_id=source_artifact_id,
+            source_content_hash=source_content_hash,
             ir_payload=pkg.model_dump(mode="json"),
             created_by=actor,
         )

@@ -9,7 +9,7 @@ services:
       - "5432:5432"
     volumes:
       - pg_data:/var/lib/postgresql/data
-      - ../sql/postgres_ddl.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
+    # Schema is created by the API on startup (Alembic migrations), not by an init SQL file.
 
   minio:
     image: minio/minio:latest

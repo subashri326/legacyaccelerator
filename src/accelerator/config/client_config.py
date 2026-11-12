@@ -7,21 +7,43 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+from accelerator.core.exceptions import ConfigError
+
+EtlTool = Literal["ssis", "informatica", "datastage", "sql", "none"]
+TargetPlatform = Literal["snowflake", "databricks", "fabric"]
 
 
 class SourceConfig(BaseModel):
     database: Literal["sqlserver", "oracle", "teradata", "duckdb", "sqlite"]
-    etl: Literal["ssis", "informatica", "datastage", "sql", "none"] = "none"
+    # `etl` accepts one tool or a list; `etl_tools` always holds the full list and `etl` the primary one.
+    etl: EtlTool = "none"
+    etl_tools: list[EtlTool] = Field(default_factory=list)
     connection: str = ""
     schemas: list[str] = Field(default_factory=list)
     catalog_bundle_path: str | None = None
     etl_export_paths: list[str] = Field(default_factory=list)
     usage_log_path: str | None = None
 
+    @model_validator(mode="before")
+    @classmethod
+    def _normalise_etl(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        data = dict(data)
+        etl = data.get("etl")
+        if isinstance(etl, list):
+            data["etl_tools"] = list(etl)
+            data["etl"] = etl[0] if etl else "none"
+        elif etl and not data.get("etl_tools"):
+            data["etl_tools"] = [] if etl == "none" else [etl]
+        return data
+
 
 class TargetConfig(BaseModel):
-    platform: Literal["snowflake", "databricks", "fabric"]
+    # Leave empty while the client is still comparing targets; Assess still runs for all three.
+    platform: TargetPlatform | None = None
     output: Literal["dbt", "sql", "native"] = "dbt"
     connection: str = ""
     database: str = "MODERN_DW"
@@ -124,7 +146,7 @@ class ClientConfig(BaseModel):
     project: str = ""
     environment: str = "dev"
     source: SourceConfig
-    target: TargetConfig
+    target: TargetConfig = Field(default_factory=TargetConfig)
     naming: NamingConfig = Field(default_factory=NamingConfig)
     type_overrides: list[TypeOverride] = Field(default_factory=list)
     custom_rules: list[CustomRule] = Field(default_factory=list)
@@ -141,6 +163,15 @@ class ClientConfig(BaseModel):
             return str(v)
         client = info.data.get("client", "client")
         return f"{client}_modernization"
+
+    def require_target(self) -> str:
+        """Return the chosen target platform, or fail clearly if the client hasn't chosen yet."""
+        if not self.target.platform:
+            raise ConfigError(
+                "No target platform chosen yet (project is in 'comparing'). "
+                "Set target.platform in the client config before Convert, Move or Reconcile."
+            )
+        return self.target.platform
 
     def type_override_map(self) -> dict[str, str]:
         return {item.source.upper(): item.target for item in self.type_overrides}

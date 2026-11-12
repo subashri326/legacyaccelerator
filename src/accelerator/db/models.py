@@ -11,6 +11,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -45,9 +46,11 @@ class Project(Base, AuditMixin):
     slug: Mapped[str] = mapped_column(String(120), nullable=False)
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     source_platform: Mapped[str] = mapped_column(String(50), nullable=False)
-    etl_tool: Mapped[str] = mapped_column(String(50), default="none", nullable=False)
-    target_platform: Mapped[str] = mapped_column(String(50), nullable=False)
-    status: Mapped[str] = mapped_column(String(40), default="active", nullable=False)
+    # A project can use several ETL tools at once (e.g. SSIS + Informatica + DataStage)
+    etl_tools: Mapped[list[str]] = mapped_column(JsonType, default=list, nullable=False)
+    # Empty while the client is still comparing targets
+    target_platform: Mapped[str | None] = mapped_column(String(50))
+    status: Mapped[str] = mapped_column(String(40), default="active", nullable=False)  # comparing | active | closed
 
     client: Mapped[Client] = relationship(back_populates="projects")
     environments: Mapped[list[Environment]] = relationship(back_populates="project", cascade="all, delete-orphan")
@@ -68,7 +71,7 @@ class Environment(Base, AuditMixin):
 
 class Connection(Base, AuditMixin):
     __tablename__ = "connection"
-    __table_args__ = (UniqueConstraint("project_id", "name", name="uq_conn_project_name"),)
+    __table_args__ = (UniqueConstraint("project_id", "environment_id", "name", name="uq_conn_project_env_name"),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
     project_id: Mapped[str] = mapped_column(ForeignKey("project.id", ondelete="CASCADE"), nullable=False)
@@ -203,6 +206,9 @@ class IrFlow(Base, AuditMixin):
     flow_key: Mapped[str] = mapped_column(String(300), nullable=False)
     name: Mapped[str] = mapped_column(String(300), nullable=False)
     source_tool: Mapped[str] = mapped_column(String(50), nullable=False)
+    # Which version of the source this flow was parsed from, so a changed source is detected
+    source_artifact_id: Mapped[str | None] = mapped_column(ForeignKey("source_artifact.id", ondelete="SET NULL"))
+    source_content_hash: Mapped[str] = mapped_column(String(64), default="", nullable=False)
     ir_payload: Mapped[dict[str, Any]] = mapped_column(JsonType, nullable=False)
 
     nodes: Mapped[list[IrNode]] = relationship(back_populates="flow", cascade="all, delete-orphan")
@@ -277,6 +283,7 @@ class Dependency(Base, AuditMixin):
         UniqueConstraint(
             "project_id", "upstream_key", "downstream_key", "edge_type", name="uq_dep_edge"
         ),
+        Index("ix_dep_project", "project_id", "upstream_key", "downstream_key"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
@@ -395,6 +402,8 @@ class ResidueItem(Base, AuditMixin):
     conversion_run_id: Mapped[str] = mapped_column(ForeignKey("conversion_run.id", ondelete="CASCADE"), nullable=False)
     project_id: Mapped[str] = mapped_column(ForeignKey("project.id", ondelete="CASCADE"), nullable=False)
     object_key: Mapped[str] = mapped_column(String(400), nullable=False)
+    # Stable component ID from the neutral model (node or task id), used to re-apply approved fixes
+    component_key: Mapped[str] = mapped_column(String(255), default="", nullable=False)
     component_name: Mapped[str] = mapped_column(String(255), nullable=False)
     reason_code: Mapped[str] = mapped_column(String(100), nullable=False)
     reason_detail: Mapped[str] = mapped_column(Text, default="", nullable=False)
@@ -412,6 +421,7 @@ class ReviewDecision(Base, AuditMixin):
     project_id: Mapped[str] = mapped_column(ForeignKey("project.id", ondelete="CASCADE"), nullable=False)
     object_key: Mapped[str] = mapped_column(String(400), nullable=False)
     residue_item_id: Mapped[str | None] = mapped_column(ForeignKey("residue_item.id", ondelete="SET NULL"))
+    component_key: Mapped[str | None] = mapped_column(String(255))
     decision: Mapped[str] = mapped_column(String(30), nullable=False)  # approved | rejected
     replacement_code: Mapped[str | None] = mapped_column(Text)
     reviewer: Mapped[str] = mapped_column(String(120), nullable=False)
@@ -430,6 +440,8 @@ class LoadRun(Base, AuditMixin):
     project_id: Mapped[str] = mapped_column(ForeignKey("project.id", ondelete="CASCADE"), nullable=False)
     object_key: Mapped[str] = mapped_column(String(400), nullable=False)
     mover_plugin: Mapped[str] = mapped_column(String(80), nullable=False)
+    # Fully qualified table actually written on the target (after naming rules)
+    target_table: Mapped[str | None] = mapped_column(String(400))
     mode: Mapped[str] = mapped_column(String(30), default="bulk", nullable=False)  # bulk | incremental
     watermark_value: Mapped[str | None] = mapped_column(String(120))
     status: Mapped[str] = mapped_column(String(30), default="running", nullable=False)
@@ -504,6 +516,8 @@ class ReconResult(Base, AuditMixin):
     target_metrics: Mapped[dict[str, Any]] = mapped_column(JsonType, default=dict, nullable=False)
     diff_summary: Mapped[dict[str, Any]] = mapped_column(JsonType, default=dict, nullable=False)
     evidence_uri: Mapped[str] = mapped_column(String(500), nullable=False)
+    # Set for job-level checks: the converted code that was run against the legacy logic
+    generated_artifact_id: Mapped[str | None] = mapped_column(ForeignKey("generated_artifact.id", ondelete="SET NULL"))
     retention_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     recon_run: Mapped[ReconRun] = relationship(back_populates="results")
@@ -525,11 +539,14 @@ class ObjectStatus(Base, AuditMixin):
     owner: Mapped[str] = mapped_column(String(120), default="unassigned", nullable=False)
     state: Mapped[str] = mapped_column(String(40), default="Discovered", nullable=False)
     blocker_reason: Mapped[str | None] = mapped_column(Text)
+    # Content hash of the source the current state was reached on; a change sends the object back
+    source_hash: Mapped[str | None] = mapped_column(String(64))
     last_evidence_ref: Mapped[str | None] = mapped_column(String(500))
 
 
 class StatusEvent(Base, AuditMixin):
     __tablename__ = "status_event"
+    __table_args__ = (Index("ix_status_event_obj", "project_id", "object_key"),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
     project_id: Mapped[str] = mapped_column(ForeignKey("project.id", ondelete="CASCADE"), nullable=False)
@@ -557,7 +574,7 @@ class Signoff(Base, AuditMixin):
 
 
 # ---------------------------------------------------------------------------
-# 10. Platform: user, role, audit_log, plugin_registry
+# 10. Platform: user, role, project_member, audit_log, plugin_registry
 # ---------------------------------------------------------------------------
 
 
@@ -582,8 +599,21 @@ class User(Base, AuditMixin):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
 
+class ProjectMember(Base, AuditMixin):
+    """Which user can see and act on which client's project, and in which role."""
+
+    __tablename__ = "project_member"
+    __table_args__ = (UniqueConstraint("project_id", "user_id", name="uq_project_member"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    project_id: Mapped[str] = mapped_column(ForeignKey("project.id", ondelete="CASCADE"), nullable=False)
+    user_id: Mapped[str] = mapped_column(ForeignKey("app_user.id", ondelete="CASCADE"), nullable=False)
+    role_name: Mapped[str] = mapped_column(String(50), nullable=False)
+
+
 class AuditLog(Base):
     __tablename__ = "audit_log"
+    __table_args__ = (Index("ix_audit_project_ts", "project_id", "timestamp"),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
     timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)

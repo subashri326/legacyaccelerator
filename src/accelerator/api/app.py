@@ -14,6 +14,7 @@ from accelerator.config.settings import get_settings
 from accelerator.core.exceptions import (
     AuthenticationError,
     AuthorizationError,
+    ConfigError,
     EvidenceRequiredError,
     PluginNotFoundError,
     StateTransitionError,
@@ -54,6 +55,10 @@ def create_app() -> FastAPI:
     @app.exception_handler(AuthorizationError)
     async def _authz_err(_req: Request, exc: AuthorizationError) -> JSONResponse:
         return JSONResponse(status_code=403, content={"detail": str(exc)})
+
+    @app.exception_handler(ConfigError)
+    async def _cfg_err(_req: Request, exc: ConfigError) -> JSONResponse:
+        return JSONResponse(status_code=400, content={"detail": str(exc)})
 
     @app.exception_handler(EvidenceRequiredError)
     async def _ev_err(_req: Request, exc: EvidenceRequiredError) -> JSONResponse:

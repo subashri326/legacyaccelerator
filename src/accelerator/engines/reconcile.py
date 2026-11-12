@@ -59,7 +59,7 @@ class ReconcileEngine:
     ) -> ReconcileSummary:
         with metrics.stage_span("reconcile", project_id):
             cfg_ver, cfg = get_active_config(db, project_id)
-            validator = self.registry.get_validator(cfg.target.platform)
+            validator = self.registry.get_validator(cfg.require_target())
 
             recon_run = ReconRun(
                 project_id=project_id,

@@ -57,6 +57,7 @@ class MoveEngine:
     ) -> MoveSummary:
         with metrics.stage_span("move", project_id):
             cfg_ver, cfg = get_active_config(db, project_id)
+            cfg.require_target()
             mover = self.registry.get_mover(cfg.movement.mover)
 
             # Determine tables in scope

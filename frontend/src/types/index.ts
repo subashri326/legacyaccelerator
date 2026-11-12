@@ -12,8 +12,8 @@ export interface ProjectSummary {
   name: string;
   client_slug: string;
   source_platform: string;
-  etl_tool: string;
-  target_platform: string;
+  etl_tools: string[];
+  target_platform: string | null;
   status: string;
 }
 

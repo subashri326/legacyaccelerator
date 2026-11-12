@@ -29,7 +29,7 @@ def list_projects(
             "name": p.name,
             "client_slug": clients[p.client_id].slug if p.client_id in clients else "",
             "source_platform": p.source_platform,
-            "etl_tool": p.etl_tool,
+            "etl_tools": p.etl_tools,
             "target_platform": p.target_platform,
             "status": p.status,
         }
@@ -77,7 +77,7 @@ def get_project(
         "slug": p.slug,
         "name": p.name,
         "source_platform": p.source_platform,
-        "etl_tool": p.etl_tool,
+        "etl_tools": p.etl_tools,
         "target_platform": p.target_platform,
         "configs": [
             {

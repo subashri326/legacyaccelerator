@@ -63,6 +63,9 @@ l2c = "accelerator.cli.main:app"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+accelerator = ["db/migrations/script.py.mako"]
+
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]

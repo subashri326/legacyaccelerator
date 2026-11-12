@@ -70,16 +70,19 @@ def ensure_project_from_config(
             slug=cfg.project,
             name=cfg.project.replace("_", " ").title(),
             source_platform=cfg.source.database,
-            etl_tool=cfg.source.etl,
+            etl_tools=list(cfg.source.etl_tools),
             target_platform=cfg.target.platform,
+            status="active" if cfg.target.platform else "comparing",
             created_by=actor,
         )
         db.add(project)
         db.flush()
     else:
         project.source_platform = cfg.source.database
-        project.etl_tool = cfg.source.etl
+        project.etl_tools = list(cfg.source.etl_tools)
         project.target_platform = cfg.target.platform
+        if project.status in ("active", "comparing"):
+            project.status = "active" if cfg.target.platform else "comparing"
 
     env = (
         db.query(Environment)
@@ -98,13 +101,17 @@ def ensure_project_from_config(
 
     for conn_name, role, platform, ref in [
         ("source_default", "source", cfg.source.database, cfg.source.connection),
-        ("target_default", "target", cfg.target.platform, cfg.target.connection),
+        ("target_default", "target", cfg.target.platform or "undecided", cfg.target.connection),
     ]:
         if not ref:
             continue
         existing_conn = (
             db.query(Connection)
-            .filter(Connection.project_id == project.id, Connection.name == conn_name)
+            .filter(
+                Connection.project_id == project.id,
+                Connection.environment_id == env.id,
+                Connection.name == conn_name,
+            )
             .first()
         )
         if existing_conn is None:

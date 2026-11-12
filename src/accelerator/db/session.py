@@ -12,7 +12,6 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from accelerator.config.settings import get_settings
 from accelerator.core.security import ROLE_PERMISSIONS, RoleName, hash_password
-from accelerator.db.base import Base
 from accelerator.db.models import Role, User
 
 
@@ -73,10 +72,25 @@ def session_scope(database_url: str | None = None) -> Iterator[Session]:
         session.close()
 
 
+def run_migrations(database_url: str | None = None) -> None:
+    """Bring the metadata database schema up to date by applying all Alembic migrations."""
+    from alembic import command
+    from alembic.config import Config
+
+    url = database_url or get_settings().database_url
+    cfg = Config()
+    cfg.set_main_option("script_location", "accelerator.db:migrations")
+    cfg.set_main_option("sqlalchemy.url", url)
+    if url.startswith("sqlite:///"):
+        db_file = Path(url.removeprefix("sqlite:///"))
+        db_file.parent.mkdir(parents=True, exist_ok=True)
+    command.upgrade(cfg, "head")
+
+
 def init_db(database_url: str | None = None, seed_defaults: bool = True) -> Engine:
-    """Create schema tables if missing and seed default RBAC roles and bootstrap users."""
+    """Apply schema migrations and seed default RBAC roles and bootstrap users."""
+    run_migrations(database_url)
     engine = get_engine(database_url)
-    Base.metadata.create_all(bind=engine)
     if seed_defaults:
         with session_scope(database_url) as db:
             seed_roles_and_admin(db)
