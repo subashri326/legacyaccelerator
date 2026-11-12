@@ -38,6 +38,17 @@ def run_migrations_offline() -> None:
 
 def run_migrations_online() -> None:
     url = get_url()
+    shared = config.attributes.get("connection")
+    if shared is not None:  # caller holds a lock on this connection; migrate through it
+        context.configure(
+            connection=shared,
+            target_metadata=target_metadata,
+            render_as_batch=url.startswith("sqlite"),
+            compare_type=True,
+        )
+        with context.begin_transaction():
+            context.run_migrations()
+        return
     section = config.get_section(config.config_ini_section) or {}
     section["sqlalchemy.url"] = url
     connectable = engine_from_config(section, prefix="sqlalchemy.", poolclass=pool.NullPool)

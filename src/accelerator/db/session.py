@@ -84,6 +84,21 @@ def run_migrations(database_url: str | None = None) -> None:
     if url.startswith("sqlite:///"):
         db_file = Path(url.removeprefix("sqlite:///"))
         db_file.parent.mkdir(parents=True, exist_ok=True)
+    if url.startswith("postgresql"):
+        # Several API replicas may start together: one runs the migrations, the others wait.
+        from sqlalchemy import create_engine, text
+
+        eng = create_engine(url)
+        with eng.connect() as conn:
+            conn.execute(text("SELECT pg_advisory_lock(724245)"))
+            try:
+                cfg.attributes["connection"] = conn
+                command.upgrade(cfg, "head")
+            finally:
+                conn.execute(text("SELECT pg_advisory_unlock(724245)"))
+                conn.commit()
+        eng.dispose()
+        return
     command.upgrade(cfg, "head")
 
 
@@ -113,6 +128,21 @@ def seed_roles_and_admin(db: Session) -> None:
             )
 
     settings = get_settings()
+    if not settings.is_dev:
+        # Outside dev: no demo accounts. One admin only if a bootstrap password is supplied.
+        has_admin = db.query(User).filter(User.role_name == RoleName.ADMIN.value).first()
+        if settings.bootstrap_admin_password and has_admin is None:
+            db.add(
+                User(
+                    username="admin",
+                    email="admin@accelerator.local",
+                    full_name="Platform Admin",
+                    role_name=RoleName.ADMIN.value,
+                    password_hash=hash_password(settings.bootstrap_admin_password),
+                    created_by="bootstrap",
+                )
+            )
+        return
     default_users = [
         ("admin", "admin@accelerator.local", "Platform Admin", RoleName.ADMIN.value),
         ("lead", "lead@accelerator.local", "Migration Lead", RoleName.MIGRATION_LEAD.value),

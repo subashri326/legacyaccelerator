@@ -5,7 +5,8 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
-from accelerator.api.deps import CurrentUser, get_db, require_perm
+from accelerator.api.deps import CurrentUser, get_db, require_project_perm
+from accelerator.core.exceptions import NotFoundError
 from accelerator.core.security import Permission
 from accelerator.core.storage import get_artifact_store
 from accelerator.db.models import (
@@ -27,7 +28,7 @@ router = APIRouter(prefix="/api/v1/projects/{project_id}", tags=["objects"])
 @router.get("/inventory")
 def get_inventory(
     project_id: str,
-    _user: CurrentUser = Depends(require_perm(Permission.VIEW_REPORTS)),
+    _user: CurrentUser = Depends(require_project_perm(Permission.VIEW_REPORTS)),
     db: Session = Depends(get_db),
 ) -> dict[str, object]:
     objs = db.query(DbObject).filter(DbObject.project_id == project_id).all()
@@ -87,7 +88,7 @@ def get_inventory(
 @router.get("/lineage")
 def get_lineage(
     project_id: str,
-    _user: CurrentUser = Depends(require_perm(Permission.VIEW_REPORTS)),
+    _user: CurrentUser = Depends(require_project_perm(Permission.VIEW_REPORTS)),
     db: Session = Depends(get_db),
 ) -> dict[str, object]:
     deps = db.query(Dependency).filter(Dependency.project_id == project_id).all()
@@ -109,7 +110,7 @@ def get_lineage(
 @router.get("/waves")
 def get_waves(
     project_id: str,
-    _user: CurrentUser = Depends(require_perm(Permission.VIEW_REPORTS)),
+    _user: CurrentUser = Depends(require_project_perm(Permission.VIEW_REPORTS)),
     db: Session = Depends(get_db),
 ) -> list[dict[str, object]]:
     waves = db.query(Wave).filter(Wave.project_id == project_id).order_by(Wave.wave_number).all()
@@ -144,7 +145,7 @@ def get_waves(
 def get_neutral_ir(
     project_id: str,
     flow_key: str,
-    _user: CurrentUser = Depends(require_perm(Permission.VIEW_REPORTS)),
+    _user: CurrentUser = Depends(require_project_perm(Permission.VIEW_REPORTS)),
     db: Session = Depends(get_db),
 ) -> dict[str, object]:
     flow = (
@@ -153,14 +154,14 @@ def get_neutral_ir(
         .first()
     )
     if flow is None:
-        raise ValueError(f"IR flow '{flow_key}' not found")
+        raise NotFoundError(f"IR flow '{flow_key}' not found")
     return {"flow_key": flow.flow_key, "source_tool": flow.source_tool, "ir": flow.ir_payload}
 
 
 @router.get("/artifacts")
 def list_artifacts(
     project_id: str,
-    _user: CurrentUser = Depends(require_perm(Permission.VIEW_REPORTS)),
+    _user: CurrentUser = Depends(require_project_perm(Permission.VIEW_REPORTS)),
     db: Session = Depends(get_db),
 ) -> list[dict[str, object]]:
     arts = db.query(GeneratedArtifact).filter(GeneratedArtifact.project_id == project_id).all()
@@ -182,7 +183,7 @@ def list_artifacts(
 def get_artifact_content(
     project_id: str,
     artifact_id: str,
-    _user: CurrentUser = Depends(require_perm(Permission.VIEW_REPORTS)),
+    _user: CurrentUser = Depends(require_project_perm(Permission.VIEW_REPORTS)),
     db: Session = Depends(get_db),
 ) -> dict[str, object]:
     art = (
@@ -191,7 +192,7 @@ def get_artifact_content(
         .first()
     )
     if art is None:
-        raise ValueError(f"Artifact '{artifact_id}' not found")
+        raise NotFoundError(f"Artifact '{artifact_id}' not found")
     return {
         "id": art.id,
         "relative_path": art.relative_path,

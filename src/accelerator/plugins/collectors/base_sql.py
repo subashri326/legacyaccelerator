@@ -13,6 +13,7 @@ import sqlglot
 from sqlglot import exp
 from sqlglot.errors import SqlglotError
 
+from accelerator.core.exceptions import ConfigError
 from accelerator.core.secrets import resolve_connection_uri
 from accelerator.ir.models import CatalogIR, ColumnIR, ProcedureIR, TableIR, ViewIR
 from accelerator.plugins.interfaces import SourceCollector
@@ -489,6 +490,11 @@ class BaseSqlCollector(SourceCollector):
             ddl_text = bundle.read_text(encoding="utf-8")
             return parse_ddl_to_catalog(ddl_text, self.source_system, self.dialect, bundle.stem)
 
+        if not connection_uri:
+            raise ConfigError(
+                "No source connection or catalog bundle configured: set source.connection "
+                "(a vault:// reference) or source.catalog_bundle_path"
+            )
         resolved = resolve_connection_uri(connection_uri)
         if resolved.startswith("duckdb:///"):
             return harvest_duckdb_catalog(resolved, self.source_system, schemas)

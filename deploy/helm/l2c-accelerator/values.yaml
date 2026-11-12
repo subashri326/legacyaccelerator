@@ -11,14 +11,28 @@ service:
   uiPort: 80
 
 config:
-  databaseUrl: "postgresql+psycopg2://l2c:REPLACE_ME@postgres:5432/l2c_metadata"
+  environment: "prod"          # anything but dev: no demo users, unsafe settings refuse to start
   storageBackend: "s3"
   s3Bucket: "client-l2c-artifacts"
   vaultBackend: "hashicorp"
+  hashicorpVaultAddr: ""
   authMode: "oidc"
   oidcIssuer: "https://login.microsoftonline.com/<tenant-id>/v2.0"
+  oidcAudience: "<application-client-id>"
+  oidcRoleClaim: "roles"
+  oidcRoleMap:                 # identity-provider role/group -> product role
+    L2C.Admin: admin
+    L2C.MigrationLead: migration_lead
+    L2C.Engineer: engineer
+    L2C.Reviewer: reviewer
+    L2C.ClientApprover: client_approver
+  corsAllowedOrigins:
+    - "https://l2c.example.com"
   aiEnabled: "false"
 
+# Supply with --set / a values file kept out of git, or replace with an external secret.
 secrets:
-  jwtSecret: "REPLACE_WITH_32_BYTE_SECRET"
-  hashicorpVaultToken: "REPLACE_WITH_VAULT_TOKEN"
+  databaseUrl: ""              # required, e.g. postgresql+psycopg2://l2c:<password>@postgres:5432/l2c_metadata
+  jwtSecret: ""                # only used when authMode=local; 32+ random characters
+  hashicorpVaultToken: ""
+  bootstrapAdminPassword: ""   # only for authMode=local: creates the first admin

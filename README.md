@@ -78,3 +78,25 @@ source are not detected.
 **What is tested where:** the automated tests run the full flow against a real PostgreSQL
 server and against DuckDB. Snowflake, Databricks, Fabric and SQL Server use the same code path
 through their SQLAlchemy dialects, but need your accounts to test end to end.
+
+## Security model
+
+- **Who sees what:** every route under `/projects/{id}` requires membership of that project, and
+  uses the user's role *on that project*. Admins see everything; anyone else sees only their
+  projects, and other clients' projects answer "not found". Whoever registers a project becomes
+  its first member; leads add others with `POST /api/v1/projects/{id}/members`.
+- **Sign-in:** `L2C_AUTH_MODE=local` (passwords + signed tokens) or `oidc` (single sign-on: tokens
+  from your identity provider are verified against its published keys, issuer, audience and expiry;
+  `L2C_OIDC_ROLE_MAP` turns identity-provider roles or groups into product roles; passwords are
+  disabled).
+- **Outside dev** (`L2C_ENVIRONMENT` not `dev`): no demo accounts are created, and the API refuses to
+  start with the default token secret or a wildcard CORS origin. Set `L2C_BOOTSTRAP_ADMIN_PASSWORD`
+  once to create the first admin when using local sign-in.
+- **Files:** uploaded file names are reduced to a plain name with an allowed extension and stored in
+  the project's own upload folder. Server paths given over the API (Discover options, client
+  configs) must be inside `L2C_ALLOWED_IMPORT_ROOTS`, and client configs registered over the API
+  must use `vault://` / `env://` connection references. Only admins write secrets.
+- **Data samples:** masked row samples from failed checks are deleted after
+  `reconciliation.l4_retention_days`; counts stay as evidence.
+- **Deployment:** the Helm chart keeps the database URL and other credentials in a Kubernetes
+  Secret; when several API replicas start, a database lock lets only one run migrations.

@@ -238,6 +238,7 @@ class ReconcileEngine:
                         f"Reconciliation ({outcome.level}) failed: {list(outcome.diff_summary.keys())}",
                     )
 
+            purge_expired_samples(db, self.store)
             recon_run.status = "completed"
             recon_run.completed_at = utcnow()
             db.flush()
@@ -263,3 +264,40 @@ class ReconcileEngine:
                 failed=failed,
                 skipped_not_loaded=skipped,
             )
+
+
+def purge_expired_samples(db: Session, store: ArtifactStore | None = None) -> int:
+    """Delete masked row samples once their retention period ends (counts stay as evidence).
+
+    Removes the samples from the database record and rewrites the evidence file without them.
+    Runs at API start-up and after every reconciliation.
+    """
+    store = store or get_artifact_store()
+    now = utcnow()
+    expired = (
+        db.query(ReconResult)
+        .filter(
+            ReconResult.retention_expires_at.isnot(None), ReconResult.retention_expires_at <= now
+        )
+        .all()
+    )
+    for res in expired:
+        diff = dict(res.diff_summary or {})
+        l4 = dict(diff.get("l4_diff") or {})
+        for k in ("only_in_source_sample", "only_in_target_sample", "value_mismatch_sample"):
+            l4.pop(k, None)
+        l4["samples_purged_at"] = now.isoformat()
+        diff["l4_diff"] = l4
+        res.diff_summary = diff
+        res.retention_expires_at = None
+        try:
+            payload = json.loads(store.get_text(res.evidence_uri))
+            payload["diff_summary"] = diff
+            key = res.evidence_uri.split("://", 1)[-1]
+            if res.evidence_uri.startswith("s3://") or res.evidence_uri.startswith("abfs://"):
+                key = key.split("/", 1)[1]
+            store.put_text(key, json.dumps(payload, indent=2, default=str))
+        except Exception:  # evidence file missing: the database copy is already purged
+            pass
+    db.flush()
+    return len(expired)

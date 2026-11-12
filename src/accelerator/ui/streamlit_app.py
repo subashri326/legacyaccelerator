@@ -11,7 +11,9 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
+from accelerator.config.settings import get_settings
 from accelerator.core.exceptions import AcceleratorError
+from accelerator.core.paths import save_upload
 from accelerator.core.secrets import get_vault
 from accelerator.core.security import Permission, has_permission, verify_password
 from accelerator.core.storage import get_artifact_store
@@ -28,6 +30,7 @@ from accelerator.db.models import (
     ObjectStatus,
     PluginRegistryEntry,
     Project,
+    ProjectMember,
     ReconResult,
     ResidueItem,
     Signoff,
@@ -87,6 +90,16 @@ def _seed_acme_demo() -> str:
         project, _, _ = ensure_project_from_config(
             db, raw_yaml, actor="ui_demo", actor_role="admin"
         )
+        for u in db.query(User).filter(User.role_name != "admin").all():  # demo personas join it
+            if not db.query(ProjectMember).filter_by(project_id=project.id, user_id=u.id).first():
+                db.add(
+                    ProjectMember(
+                        project_id=project.id,
+                        user_id=u.id,
+                        role_name=u.role_name,
+                        created_by="ui_demo",
+                    )
+                )
         return project.id
 
 
@@ -143,8 +156,9 @@ def main() -> None:
     st.sidebar.title("L2C Accelerator")
     st.sidebar.caption("Platform-Neutral · Metadata-Driven")
 
-    # Authentication / Persona selection
-    if "auth_user" not in st.session_state:
+    # Authentication: in dev the demo admin is pre-selected; elsewhere a real sign-in is required.
+    settings = get_settings()
+    if "auth_user" not in st.session_state and settings.is_dev:
         st.session_state["auth_user"] = {"username": "admin", "role": "admin"}
 
     with st.sidebar.expander("Account & RBAC Persona", expanded=False):
@@ -155,7 +169,9 @@ def main() -> None:
                 for u in users
             }
         selected_label = st.selectbox("Persona", list(user_opts.keys()))
-        pwd = st.text_input("Password (default: admin123!)", value="admin123!", type="password")
+        pwd = st.text_input(
+            "Password", value="admin123!" if settings.is_dev else "", type="password"
+        )
         if st.button("Sign In"):
             uname, rname, phash = user_opts[selected_label]
             if verify_password(pwd, phash):
@@ -164,17 +180,31 @@ def main() -> None:
             else:
                 st.error("Invalid password")
 
+    if "auth_user" not in st.session_state:
+        st.title("Legacy-to-Cloud Data Modernization Accelerator")
+        st.info("Sign in from the sidebar to continue.")
+        return
     actor = st.session_state["auth_user"]["username"]
     role = st.session_state["auth_user"]["role"]
     st.sidebar.info(f"Signed in: **{actor}** (`{role}`)")
 
-    if st.sidebar.button("Load Acme Retail Demo Estate", type="primary"):
+    if settings.is_dev and st.sidebar.button("Load Acme Retail Demo Estate", type="primary"):
         pid = _seed_acme_demo()
         st.session_state["selected_project_id"] = pid
         st.rerun()
 
     with session_scope() as db:
-        projects = db.query(Project).order_by(Project.created_at.desc()).all()
+        q = db.query(Project).order_by(Project.created_at.desc())
+        if role != "admin":  # same rule as the API: members only
+            user_row = db.query(User).filter(User.username == actor).first()
+            member_of = [
+                m.project_id
+                for m in db.query(ProjectMember).filter(
+                    ProjectMember.user_id == (user_row.id if user_row else "")
+                )
+            ]
+            q = q.filter(Project.id.in_(member_of))
+        projects = q.all()
         proj_map = {f"{p.name} [{p.source_platform} → {p.target_platform}]": p.id for p in projects}
 
     if not proj_map:
@@ -274,12 +304,8 @@ def main() -> None:
         if st.button("Run Discover", disabled=not has_permission(role, Permission.RUN_DISCOVER)):
             extra_paths: list[str] = []
             if uploaded:
-                up_dir = Path(".l2c_data/uploads")
-                up_dir.mkdir(parents=True, exist_ok=True)
                 for f in uploaded:
-                    p = up_dir / f.name
-                    p.write_bytes(f.getvalue())
-                    extra_paths.append(str(p))
+                    extra_paths.append(str(save_upload(project_id, f.name, f.getvalue())))
             with session_scope() as db:
                 res = DiscoverEngine().run(
                     db, project_id, actor=actor, actor_role=role, extra_etl_paths=extra_paths

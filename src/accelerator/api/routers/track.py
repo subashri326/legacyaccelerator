@@ -5,7 +5,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Response
 from sqlalchemy.orm import Session
 
-from accelerator.api.deps import CurrentUser, get_db, require_perm
+from accelerator.api.deps import CurrentUser, get_db, require_project_perm
 from accelerator.api.schemas import SignoffRequest
 from accelerator.core.security import Permission
 from accelerator.core.storage import get_artifact_store
@@ -18,7 +18,7 @@ router = APIRouter(prefix="/api/v1/projects/{project_id}", tags=["track"])
 @router.get("/dashboard")
 def dashboard(
     project_id: str,
-    _user: CurrentUser = Depends(require_perm(Permission.VIEW_REPORTS)),
+    _user: CurrentUser = Depends(require_project_perm(Permission.VIEW_REPORTS)),
     db: Session = Depends(get_db),
 ) -> dict[str, object]:
     return TrackEngine().get_dashboard(db, project_id)
@@ -27,7 +27,7 @@ def dashboard(
 @router.get("/reconciliation")
 def list_reconciliation(
     project_id: str,
-    _user: CurrentUser = Depends(require_perm(Permission.VIEW_REPORTS)),
+    _user: CurrentUser = Depends(require_project_perm(Permission.VIEW_REPORTS)),
     db: Session = Depends(get_db),
 ) -> list[dict[str, object]]:
     rows = (
@@ -56,7 +56,7 @@ def list_reconciliation(
 @router.get("/load-runs")
 def list_load_runs(
     project_id: str,
-    _user: CurrentUser = Depends(require_perm(Permission.VIEW_REPORTS)),
+    _user: CurrentUser = Depends(require_project_perm(Permission.VIEW_REPORTS)),
     db: Session = Depends(get_db),
 ) -> list[dict[str, object]]:
     runs = (
@@ -92,7 +92,7 @@ def list_load_runs(
 @router.get("/signoffs")
 def list_signoffs(
     project_id: str,
-    _user: CurrentUser = Depends(require_perm(Permission.VIEW_REPORTS)),
+    _user: CurrentUser = Depends(require_project_perm(Permission.VIEW_REPORTS)),
     db: Session = Depends(get_db),
 ) -> list[dict[str, object]]:
     rows = db.query(Signoff).filter(Signoff.project_id == project_id).all()
@@ -115,7 +115,7 @@ def list_signoffs(
 def sign_off(
     project_id: str,
     body: SignoffRequest,
-    user: CurrentUser = Depends(require_perm(Permission.SIGN_OFF)),
+    user: CurrentUser = Depends(require_project_perm(Permission.SIGN_OFF)),
     db: Session = Depends(get_db),
 ) -> dict[str, object]:
     row = TrackEngine().sign_off(
@@ -139,7 +139,7 @@ def sign_off(
 @router.get("/audit-log")
 def get_audit_log(
     project_id: str,
-    _user: CurrentUser = Depends(require_perm(Permission.VIEW_AUDIT)),
+    _user: CurrentUser = Depends(require_project_perm(Permission.VIEW_AUDIT)),
     db: Session = Depends(get_db),
 ) -> list[dict[str, object]]:
     rows = (
@@ -168,7 +168,7 @@ def get_audit_log(
 def object_history(
     project_id: str,
     object_key: str,
-    _user: CurrentUser = Depends(require_perm(Permission.VIEW_REPORTS)),
+    _user: CurrentUser = Depends(require_project_perm(Permission.VIEW_REPORTS)),
     db: Session = Depends(get_db),
 ) -> list[dict[str, object]]:
     rows = (
@@ -194,7 +194,7 @@ def object_history(
 def export_steering(
     project_id: str,
     format: str = "markdown",
-    _user: CurrentUser = Depends(require_perm(Permission.VIEW_REPORTS)),
+    _user: CurrentUser = Depends(require_project_perm(Permission.VIEW_REPORTS)),
     db: Session = Depends(get_db),
 ) -> Response:
     uris = TrackEngine().export_steering_summary(db, project_id)

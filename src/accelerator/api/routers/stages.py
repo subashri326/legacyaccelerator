@@ -7,13 +7,14 @@ from dataclasses import asdict
 from fastapi import APIRouter, Depends, File, UploadFile
 from sqlalchemy.orm import Session
 
-from accelerator.api.deps import CurrentUser, get_db, require_perm
+from accelerator.api.deps import CurrentUser, get_db, require_project_perm
 from accelerator.api.schemas import (
     ConvertRequest,
     DiscoverRequest,
     MoveRequest,
     ReconcileRequest,
 )
+from accelerator.core.paths import MAX_UPLOAD_BYTES, check_import_path, save_upload
 from accelerator.core.security import Permission
 from accelerator.engines.assess import AssessEngine
 from accelerator.engines.convert import ConvertEngine
@@ -29,16 +30,23 @@ router = APIRouter(prefix="/api/v1/projects/{project_id}", tags=["stages"])
 def run_discover(
     project_id: str,
     body: DiscoverRequest = DiscoverRequest(),
-    user: CurrentUser = Depends(require_perm(Permission.RUN_DISCOVER)),
+    user: CurrentUser = Depends(require_project_perm(Permission.RUN_DISCOVER)),
     db: Session = Depends(get_db),
 ) -> dict[str, object]:
+    # Server paths from API callers must stay inside the configured import folders.
+    extra = [str(check_import_path(p)) for p in body.extra_etl_paths]
+    bundle = (
+        str(check_import_path(body.catalog_bundle_override))
+        if body.catalog_bundle_override
+        else None
+    )
     summary = DiscoverEngine().run(
         db,
         project_id,
         actor=user.username,
         actor_role=user.role,
-        extra_etl_paths=body.extra_etl_paths,
-        catalog_bundle_override=body.catalog_bundle_override,
+        extra_etl_paths=extra,
+        catalog_bundle_override=bundle,
     )
     db.commit()
     return asdict(summary)
@@ -48,31 +56,26 @@ def run_discover(
 async def upload_and_discover(
     project_id: str,
     file: UploadFile = File(...),
-    user: CurrentUser = Depends(require_perm(Permission.RUN_DISCOVER)),
+    user: CurrentUser = Depends(require_project_perm(Permission.RUN_DISCOVER)),
     db: Session = Depends(get_db),
 ) -> dict[str, object]:
-    import tempfile
-    from pathlib import Path
-
-    raw = await file.read()
-    with tempfile.TemporaryDirectory() as tmp:
-        target = Path(tmp) / (file.filename or "artifact.dtsx")
-        target.write_bytes(raw)
-        summary = DiscoverEngine().run(
-            db,
-            project_id,
-            actor=user.username,
-            actor_role=user.role,
-            extra_etl_paths=[str(target)],
-        )
-        db.commit()
-        return asdict(summary)
+    raw = await file.read(MAX_UPLOAD_BYTES + 1)
+    target = save_upload(project_id, file.filename, raw)
+    summary = DiscoverEngine().run(
+        db,
+        project_id,
+        actor=user.username,
+        actor_role=user.role,
+        extra_etl_paths=[str(target)],
+    )
+    db.commit()
+    return asdict(summary)
 
 
 @router.post("/assess")
 def run_assess(
     project_id: str,
-    user: CurrentUser = Depends(require_perm(Permission.RUN_ASSESS)),
+    user: CurrentUser = Depends(require_project_perm(Permission.RUN_ASSESS)),
     db: Session = Depends(get_db),
 ) -> dict[str, object]:
     summary = AssessEngine().run(db, project_id, actor=user.username, actor_role=user.role)
@@ -84,7 +87,7 @@ def run_assess(
 def run_convert(
     project_id: str,
     body: ConvertRequest = ConvertRequest(),
-    user: CurrentUser = Depends(require_perm(Permission.RUN_CONVERT)),
+    user: CurrentUser = Depends(require_project_perm(Permission.RUN_CONVERT)),
     db: Session = Depends(get_db),
 ) -> dict[str, object]:
     summary = ConvertEngine().run(
@@ -106,7 +109,7 @@ def run_convert(
 def run_move(
     project_id: str,
     body: MoveRequest = MoveRequest(),
-    user: CurrentUser = Depends(require_perm(Permission.RUN_MOVE)),
+    user: CurrentUser = Depends(require_project_perm(Permission.RUN_MOVE)),
     db: Session = Depends(get_db),
 ) -> dict[str, object]:
     summary = MoveEngine().run(
@@ -127,7 +130,7 @@ def run_move(
 def run_reconcile(
     project_id: str,
     body: ReconcileRequest = ReconcileRequest(),
-    user: CurrentUser = Depends(require_perm(Permission.RUN_RECONCILE)),
+    user: CurrentUser = Depends(require_project_perm(Permission.RUN_RECONCILE)),
     db: Session = Depends(get_db),
 ) -> dict[str, object]:
     summary = ReconcileEngine().run(
@@ -147,7 +150,7 @@ def run_reconcile(
 def run_full_pipeline(
     project_id: str,
     deliver_git: bool = False,
-    user: CurrentUser = Depends(require_perm(Permission.RUN_CONVERT)),
+    user: CurrentUser = Depends(require_project_perm(Permission.RUN_CONVERT)),
     db: Session = Depends(get_db),
 ) -> dict[str, object]:
     res = RunOrchestrator().run_pipeline(

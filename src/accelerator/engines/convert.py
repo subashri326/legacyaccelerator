@@ -9,7 +9,7 @@ from pathlib import Path
 from sqlalchemy.orm import Session
 
 from accelerator.core.ai_assist import ResidueAiAssistant
-from accelerator.core.exceptions import EvidenceRequiredError
+from accelerator.core.exceptions import EvidenceRequiredError, NotFoundError
 from accelerator.core.git_delivery import GitDeliveryResult, GitDeliveryService
 from accelerator.core.observability import metrics
 from accelerator.core.storage import ArtifactStore, get_artifact_store
@@ -101,7 +101,7 @@ class ConvertEngine:
                     db.query(Wave).filter(Wave.id == wave_id, Wave.project_id == project_id).first()
                 )
                 if wave is None:
-                    raise ValueError(f"Wave '{wave_id}' not found")
+                    raise NotFoundError(f"Wave '{wave_id}' not found")
                 wave_name = f"wave-{wave.wave_number}"
                 members = db.query(WaveMember).filter(WaveMember.wave_id == wave_id).all()
                 allowed_keys = {m.object_key for m in members}
@@ -377,7 +377,7 @@ class ConvertEngine:
             .first()
         )
         if item is None:
-            raise ValueError(f"ResidueItem '{residue_id}' not found")
+            raise NotFoundError(f"ResidueItem '{residue_id}' not found")
 
         suggestion = self.ai_assistant.suggest_fix(
             original_snippet=item.original_snippet,
@@ -421,7 +421,7 @@ class ConvertEngine:
             .first()
         )
         if item is None:
-            raise ValueError(f"ResidueItem '{residue_id}' not found")
+            raise NotFoundError(f"ResidueItem '{residue_id}' not found")
 
         final_code = replacement_code or item.ai_proposed_code
         if decision == "approved":
@@ -526,7 +526,7 @@ class ConvertEngine:
             .first()
         )
         if obj_status is None:
-            raise ValueError(f"Object '{object_key}' not found")
+            raise NotFoundError(f"Object '{object_key}' not found")
 
         dec = ReviewDecision(
             project_id=project_id,

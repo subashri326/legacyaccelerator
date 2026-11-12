@@ -47,6 +47,22 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 480
     oidc_issuer: str = ""
     oidc_audience: str = ""
+    # Which token claim holds the user's groups/roles, and how its values map to product roles
+    # (e.g. {"L2C-Admins": "admin", "L2C-Leads": "migration_lead"}). Unmapped users get the default.
+    oidc_username_claim: str = "preferred_username"
+    oidc_role_claim: str = "roles"
+    oidc_role_map: dict[str, str] = {}
+    oidc_default_role: str = "viewer"
+    oidc_jwks_url: str = ""  # defaults to <issuer>/.well-known discovery
+    # Browser origins allowed to call the API (the React UI). No wildcard.
+    cors_allowed_origins: list[str] = [
+        "http://localhost:5173",
+        "http://localhost:3000",
+        "http://localhost:8501",
+    ]
+    # Server folders Discover may read ETL exports / catalog bundles from. Anything else is refused.
+    allowed_import_roots: list[str] = ["examples", ".l2c_data/uploads"]
+    upload_dir: Path = Path("./.l2c_data/uploads")
 
     # Optional AI Assist (code-only residue suggestions, client opt-in)
     ai_enabled: bool = False
@@ -57,7 +73,14 @@ class Settings(BaseSettings):
     # Data governance & observability
     l4_sample_retention_days: int = 7
     otel_service_name: str = "l2c-accelerator"
+    # Demo users (admin, lead, engineer, ...) with this password are created only when
+    # environment == "dev". Elsewhere, set bootstrap_admin_password to create one admin.
     default_admin_password: str = "admin123!"
+    bootstrap_admin_password: str = ""
+
+    @property
+    def is_dev(self) -> bool:
+        return self.environment.lower() in ("dev", "development", "local", "test")
 
 
 @lru_cache(maxsize=1)

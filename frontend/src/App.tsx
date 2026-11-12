@@ -15,8 +15,8 @@ type Page = "track" | "assess" | "convert" | "move_recon" | "signoff" | "admin";
 
 export function App(): React.ReactElement {
   const [auth, setAuth] = useState<TokenResponse | null>(null);
-  const [username, setUsername] = useState("admin");
-  const [password, setPassword] = useState("admin123!");
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [page, setPage] = useState<Page>("track");
 

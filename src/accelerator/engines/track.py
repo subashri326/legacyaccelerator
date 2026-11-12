@@ -10,7 +10,7 @@ from typing import Any
 from openpyxl import Workbook
 from sqlalchemy.orm import Session
 
-from accelerator.core.exceptions import EvidenceRequiredError
+from accelerator.core.exceptions import EvidenceRequiredError, NotFoundError
 from accelerator.core.observability import metrics
 from accelerator.core.storage import ArtifactStore, get_artifact_store
 from accelerator.db.models import (
@@ -99,7 +99,7 @@ class TrackEngine:
                 .first()
             )
             if obj_status is None:
-                raise ValueError(f"Object '{object_key}' not found in project")
+                raise NotFoundError(f"Object '{object_key}' not found in project")
 
             if obj_status.state not in (ObjectState.VALIDATED.value, ObjectState.SIGNED_OFF.value):
                 raise EvidenceRequiredError(
