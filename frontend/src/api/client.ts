@@ -1,125 +1,172 @@
 import type {
-  DashboardData,
+  Client,
+  ConnectorType,
+  Dashboard,
   GeneratedArtifact,
   InventoryItem,
-  PluginEntry,
-  ProjectSummary,
+  LoadRun,
+  Me,
+  Migration,
   ReconResult,
   ResidueItem,
+  Run,
+  SavedConnection,
+  StageName,
+  TestResult,
   TokenResponse,
+  Upload,
 } from "../types";
 
 const BASE = "/api/v1";
+const TOKEN_KEY = "l2c_token";
+
+function readToken(): string | null {
+  try {
+    return localStorage.getItem(TOKEN_KEY);
+  } catch {
+    return null;
+  }
+}
+
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    public status: number,
+  ) {
+    super(message);
+  }
+}
 
 class ApiClient {
-  private token: string | null = localStorage.getItem("l2c_token");
+  private token: string | null = readToken();
+  onUnauthorized: (() => void) | null = null;
+
+  get signedIn(): boolean {
+    return this.token !== null;
+  }
 
   setToken(token: string | null): void {
     this.token = token;
-    if (token) {
-      localStorage.setItem("l2c_token", token);
-    } else {
-      localStorage.removeItem("l2c_token");
+    try {
+      if (token) localStorage.setItem(TOKEN_KEY, token);
+      else localStorage.removeItem(TOKEN_KEY);
+    } catch {
+      /* storage unavailable: keep the token in memory only */
     }
   }
 
   private async request<T>(path: string, init: RequestInit = {}): Promise<T> {
-    const headers: Record<string, string> = {
-      "Content-Type": "application/json",
-      ...(init.headers as Record<string, string> | undefined),
-    };
-    if (this.token) {
-      headers.Authorization = `Bearer ${this.token}`;
-    }
+    const headers: Record<string, string> = { ...(init.headers as Record<string, string>) };
+    if (!(init.body instanceof FormData)) headers["Content-Type"] = "application/json";
+    if (this.token) headers.Authorization = `Bearer ${this.token}`;
     const resp = await fetch(`${BASE}${path}`, { ...init, headers });
+    if (resp.status === 401) {
+      this.setToken(null);
+      this.onUnauthorized?.();
+    }
     if (!resp.ok) {
-      const errBody = await resp.json().catch(() => ({ detail: resp.statusText }));
-      throw new Error(errBody.detail || `HTTP ${resp.status}`);
+      const body = await resp.json().catch(() => ({ detail: resp.statusText }));
+      const detail = Array.isArray(body.detail)
+        ? body.detail.map((d: { msg: string }) => d.msg).join("; ")
+        : body.detail;
+      throw new ApiError(detail || `Request failed (${resp.status})`, resp.status);
     }
     return (await resp.json()) as T;
   }
 
-  login(username: string, password: string): Promise<TokenResponse> {
-    return this.request<TokenResponse>("/auth/login", {
-      method: "POST",
-      body: JSON.stringify({ username, password }),
+  private post<T>(path: string, body: unknown = {}): Promise<T> {
+    return this.request<T>(path, { method: "POST", body: JSON.stringify(body) });
+  }
+
+  // auth
+  login = (username: string, password: string) =>
+    this.post<TokenResponse>("/auth/login", { username, password });
+  me = () => this.request<Me>("/auth/me");
+
+  // clients & connections
+  connectorTypes = () => this.request<ConnectorType[]>("/connector-types");
+  clients = () => this.request<Client[]>("/clients");
+  createClient = (name: string) => this.post<Client>("/clients", { name });
+  connections = (client: string, kind?: "source" | "target") =>
+    this.request<SavedConnection[]>(
+      `/connections?client=${encodeURIComponent(client)}${kind ? `&kind=${kind}` : ""}`,
+    );
+  connection = async (client: string, id: string) => {
+    const all = await this.connections(client);
+    const found = all.find((c) => c.id === id);
+    if (!found) throw new ApiError("Connection not found", 404);
+    return found;
+  };
+  testUnsaved = (type: string, settings: Record<string, unknown>, connectionId?: string) =>
+    this.post<TestResult>("/connections/test", {
+      type,
+      settings,
+      connection_id: connectionId ?? null,
     });
-  }
-
-  listProjects(): Promise<ProjectSummary[]> {
-    return this.request<ProjectSummary[]>("/projects");
-  }
-
-  registerProjectYaml(rawYaml: string): Promise<{ project_id: string }> {
-    return this.request("/projects/register-yaml", {
-      method: "POST",
-      body: JSON.stringify({ raw_yaml: rawYaml }),
-    });
-  }
-
-  runStage(projectId: string, stage: string, body: Record<string, unknown> = {}): Promise<unknown> {
-    return this.request(`/projects/${projectId}/${stage}`, {
-      method: "POST",
+  createConnection = (body: {
+    client: string;
+    name: string;
+    type: string;
+    kind?: string;
+    settings: Record<string, unknown>;
+  }) => this.post<SavedConnection>("/connections", body);
+  updateConnection = (id: string, body: { name?: string; settings: Record<string, unknown> }) =>
+    this.request<SavedConnection>(`/connections/${id}`, {
+      method: "PUT",
       body: JSON.stringify(body),
     });
-  }
+  deleteConnection = (id: string) =>
+    this.request<{ deleted: string }>(`/connections/${id}`, { method: "DELETE" });
+  testSaved = (id: string) => this.post<TestResult>(`/connections/${id}/test`);
+  schemas = (id: string) => this.request<{ schemas: string[] }>(`/connections/${id}/schemas`);
+  tables = (id: string, schema: string) =>
+    this.request<{ schema: string; tables: string[] }>(
+      `/connections/${id}/schemas?schema=${encodeURIComponent(schema)}`,
+    );
 
-  getDashboard(projectId: string): Promise<DashboardData> {
-    return this.request<DashboardData>(`/projects/${projectId}/dashboard`);
-  }
-
-  getInventory(projectId: string): Promise<{ items: InventoryItem[] }> {
-    return this.request<{ items: InventoryItem[] }>(`/projects/${projectId}/inventory`);
-  }
-
-  listResidues(projectId: string): Promise<ResidueItem[]> {
-    return this.request<ResidueItem[]>(`/projects/${projectId}/residues`);
-  }
-
-  aiProposeResidue(projectId: string, residueId: string): Promise<ResidueItem> {
-    return this.request<ResidueItem>(`/projects/${projectId}/residues/${residueId}/ai-propose`, {
+  upload = (client: string, file: File) => {
+    const form = new FormData();
+    form.append("file", file);
+    return this.request<Upload>(`/clients/${encodeURIComponent(client)}/uploads`, {
       method: "POST",
+      body: form,
     });
-  }
+  };
 
-  decideResidue(
-    projectId: string,
-    residueId: string,
-    decision: "approved" | "rejected",
-    replacementCode?: string
-  ): Promise<unknown> {
-    return this.request(`/projects/${projectId}/residues/${residueId}/decide`, {
-      method: "POST",
-      body: JSON.stringify({ decision, replacement_code: replacementCode, comment: "Reviewed in React UI" }),
+  // migrations & runs
+  migrations = () => this.request<Migration[]>("/migrations");
+  migration = (id: string) => this.request<Migration>(`/migrations/${id}`);
+  createMigration = (body: Record<string, unknown>) =>
+    this.post<{ id: string; name: string; config_yaml: string }>("/migrations", body);
+  startRun = (projectId: string, stages?: StageName[]) =>
+    this.post<Run>(`/projects/${projectId}/runs`, stages ? { stages } : {});
+  runs = (projectId: string) => this.request<Run[]>(`/projects/${projectId}/runs`);
+  run = (projectId: string, runId: string) =>
+    this.request<Run>(`/projects/${projectId}/runs/${runId}`);
+
+  // project details
+  project = (id: string) =>
+    this.request<{ configs: { version_num: number; raw_yaml: string; is_active: boolean }[] }>(
+      `/projects/${id}`,
+    );
+  dashboard = (id: string) => this.request<Dashboard>(`/projects/${id}/dashboard`);
+  inventory = (id: string) => this.request<{ items: InventoryItem[] }>(`/projects/${id}/inventory`);
+  residues = (id: string) => this.request<ResidueItem[]>(`/projects/${id}/residues`);
+  decide = (id: string, residueId: string, decision: "approved" | "rejected", code: string) =>
+    this.post(`/projects/${id}/residues/${residueId}/decide`, {
+      decision,
+      replacement_code: code,
+      comment: "",
     });
-  }
-
-  listArtifacts(projectId: string): Promise<GeneratedArtifact[]> {
-    return this.request<GeneratedArtifact[]>(`/projects/${projectId}/artifacts`);
-  }
-
-  getArtifactContent(projectId: string, artifactId: string): Promise<{ content: string }> {
-    return this.request<{ content: string }>(`/projects/${projectId}/artifacts/${artifactId}/content`);
-  }
-
-  listReconciliation(projectId: string): Promise<ReconResult[]> {
-    return this.request<ReconResult[]>(`/projects/${projectId}/reconciliation`);
-  }
-
-  signOff(projectId: string, objectKey: string): Promise<unknown> {
-    return this.request(`/projects/${projectId}/signoff`, {
-      method: "POST",
-      body: JSON.stringify({ object_key: objectKey }),
-    });
-  }
-
-  listPlugins(): Promise<PluginEntry[]> {
-    return this.request<PluginEntry[]>("/plugins");
-  }
-
-  runGoldenTests(): Promise<Array<{ name: string; passed: boolean; message: string }>> {
-    return this.request("/plugins/run-golden", { method: "POST" });
-  }
+  aiPropose = (id: string, residueId: string) =>
+    this.post<ResidueItem>(`/projects/${id}/residues/${residueId}/ai-propose`);
+  artifacts = (id: string) => this.request<GeneratedArtifact[]>(`/projects/${id}/artifacts`);
+  artifactContent = (id: string, artifactId: string) =>
+    this.request<{ content: string }>(`/projects/${id}/artifacts/${artifactId}/content`);
+  reconciliation = (id: string) => this.request<ReconResult[]>(`/projects/${id}/reconciliation`);
+  loadRuns = (id: string) => this.request<LoadRun[]>(`/projects/${id}/load-runs`);
+  signoff = (id: string, objectKey: string) =>
+    this.post(`/projects/${id}/signoff`, { object_key: objectKey });
 }
 
 export const api = new ApiClient();

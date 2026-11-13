@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import subprocess
-import sys
 from pathlib import Path
 
 import typer
@@ -220,20 +218,10 @@ def plugins(
 
 @app.command()
 def serve(host: str = "127.0.0.1", port: int = 8000) -> None:
-    """Start the FastAPI control-plane REST API."""
+    """Start the accelerator: the web app and its API on one address (http://HOST:PORT)."""
     import uvicorn
 
     uvicorn.run("accelerator.api.app:app", host=host, port=port, reload=False)
-
-
-@app.command()
-def ui(port: int = 8501) -> None:
-    """Launch the Python-native Streamlit Web UI."""
-    app_path = Path(__file__).resolve().parent.parent / "ui" / "streamlit_app.py"
-    subprocess.run(
-        [sys.executable, "-m", "streamlit", "run", str(app_path), "--server.port", str(port)],
-        check=True,
-    )
 
 
 if __name__ == "__main__":
