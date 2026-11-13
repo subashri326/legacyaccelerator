@@ -12,7 +12,6 @@ from accelerator.core.observability import metrics
 from accelerator.core.storage import ArtifactStore, get_artifact_store
 from accelerator.db.base import utcnow
 from accelerator.db.models import (
-    DbColumn,
     DbObject,
     ObjectStatus,
     ReconResult,
@@ -20,9 +19,8 @@ from accelerator.db.models import (
     ReconRun,
     WaveMember,
 )
-from accelerator.db.repository import get_active_config, record_audit
+from accelerator.db.repository import get_active_config, record_audit, table_ir_from_db
 from accelerator.engines.state_machine import ObjectState, StateMachine
-from accelerator.ir.models import ColumnIR, TableIR
 from accelerator.plugins.interfaces import ValidationOutcome
 from accelerator.plugins.registry import PluginRegistry, get_plugin_registry
 
@@ -107,27 +105,7 @@ class ReconcileEngine:
                 ):
                     skipped += 1
                     continue
-                cols = (
-                    db.query(DbColumn)
-                    .filter(DbColumn.db_object_id == obj.id)
-                    .order_by(DbColumn.ordinal_position)
-                    .all()
-                )
-                tbl_ir = TableIR(
-                    database=obj.database_name,
-                    schema_name=obj.schema_name,
-                    name=obj.object_name,
-                    columns=[
-                        ColumnIR(
-                            name=c.column_name,
-                            data_type=c.data_type,
-                            nullable=c.nullable,
-                            is_primary_key=c.is_primary_key,
-                            ordinal_position=c.ordinal_position,
-                        )
-                        for c in cols
-                    ],
-                )
+                tbl_ir = table_ir_from_db(db, obj)
 
                 rule = cfg.reconciliation.get_table_rule(obj.fqn)
                 if level_override:

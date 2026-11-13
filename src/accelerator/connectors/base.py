@@ -173,6 +173,13 @@ class DuckDBConnector(Connector):
     kind = "duckdb"
     dialect = "duckdb"
 
+    def transpile(self, sql: str, read: str) -> list[str]:
+        # DuckDB text and binary types have no length limit: VARCHAR(MAX) is just VARCHAR.
+        return [
+            re.sub(r"\(\s*MAX\s*\)", "", s, flags=re.IGNORECASE)
+            for s in super().transpile(sql, read)
+        ]
+
     def __init__(self, path: str, read_only: bool = False) -> None:
         import duckdb
 
@@ -216,6 +223,8 @@ _SQLA_DIALECTS = {
     "sqlite": "sqlite",
     "mysql": "mysql",
     "oracle": "oracle",
+    "teradatasql": "teradata",
+    "teradata": "teradata",
     "snowflake": "snowflake",
     "databricks": "databricks",
 }

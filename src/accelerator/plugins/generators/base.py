@@ -11,6 +11,7 @@ from sqlglot.errors import SqlglotError
 from accelerator.config.client_config import ClientConfig
 from accelerator.ir.expressions import DIALECT_MAP
 from accelerator.ir.models import (
+    ColumnIR,
     DataFlowGraphIR,
     NodeOperator,
     OpaqueSnippetIR,
@@ -24,6 +25,7 @@ from accelerator.plugins.generators.flow_sql import (
     SqlRenderer,
     render_sql_tasks,
 )
+from accelerator.plugins.generators.types import map_source_type
 from accelerator.plugins.interfaces import (
     GeneratedBundle,
     GeneratedFile,
@@ -190,13 +192,37 @@ class BaseTargetGenerator(TargetGenerator):
             return f"{mapped_base}({param_match.group(1)})"
         return mapped_base
 
+    def map_column_type(self, col: ColumnIR, config: ClientConfig) -> tuple[str, str | None]:
+        """Target type for a column, and a review note when the mapping is not exact."""
+        overrides = config.type_override_map()
+        base_token = re.split(r"[\(\s]", col.data_type.strip().upper())[0]
+        if col.data_type.upper() in overrides or base_token in overrides:
+            return self.map_data_type(col.data_type, config), None
+        if config.source.database in ("oracle", "teradata"):
+            return map_source_type(
+                col.data_type, config.source.database, self.platform, col.attributes
+            )
+        return self.map_data_type(col.data_type, config), None
+
     def generate_ddl(self, table: TableIR, config: ClientConfig) -> GeneratedFile:
         schema_name = self.resolve_schema(table, config)
         tbl_name = self.resolve_table_name(table.name, config)
         col_lines: list[str] = []
+        notes: list[GeneratedResidue] = []
         for col in sorted(table.columns, key=lambda c: c.ordinal_position):
             c_name = self.resolve_column_name(col.name, config)
-            c_type = self.map_data_type(col.data_type, config)
+            c_type, note = self.map_column_type(col, config)
+            if note:
+                notes.append(
+                    GeneratedResidue(
+                        object_key=table.fqn,
+                        component_name=f"{table.name}.{col.name}",
+                        reason_code="TYPE_MAPPING_REVIEW",
+                        reason_detail=f"{col.data_type} -> {c_type}: {note}",
+                        original_snippet=f"{col.name} {col.data_type}",
+                        component_key=f"{table.fqn}:{col.name}:type",
+                    )
+                )
             null_clause = "" if col.nullable else " NOT NULL"
             col_lines.append(f"    {c_name} {c_type}{null_clause}")
 
@@ -216,6 +242,7 @@ class BaseTargetGenerator(TargetGenerator):
             object_key=table.fqn,
             compile_passed=ok,
             compile_log=log,
+            review_notes=notes,
         )
 
     def generate_package(
@@ -252,7 +279,8 @@ class BaseTargetGenerator(TargetGenerator):
                 )
 
         sql_tools = {"tsql", "plsql", "bteq", "sql"}
-        read = "neutral" if package.source_tool in sql_tools else "tsql"
+        # SQL statements are kept in the dialect they were written in (SSIS Execute SQL: T-SQL).
+        read = {"plsql": "oracle", "bteq": "teradata"}.get(package.source_tool, "tsql")
         sql_result = render_sql_tasks(renderer, package, read, accepted)
         models += sql_result.models
         steps += sql_result.steps

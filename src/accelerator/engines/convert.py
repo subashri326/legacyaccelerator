@@ -16,7 +16,6 @@ from accelerator.core.storage import ArtifactStore, get_artifact_store
 from accelerator.db.base import utcnow
 from accelerator.db.models import (
     ConversionRun,
-    DbColumn,
     DbObject,
     GeneratedArtifact,
     IrFlow,
@@ -26,9 +25,9 @@ from accelerator.db.models import (
     Wave,
     WaveMember,
 )
-from accelerator.db.repository import get_active_config, record_audit
+from accelerator.db.repository import get_active_config, record_audit, table_ir_from_db
 from accelerator.engines.state_machine import ObjectState, StateMachine
-from accelerator.ir.models import ColumnIR, PackageIR, TableIR
+from accelerator.ir.models import PackageIR, TableIR
 from accelerator.plugins.interfaces import GeneratedFile
 from accelerator.plugins.registry import PluginRegistry, get_plugin_registry
 
@@ -110,30 +109,7 @@ class ConvertEngine:
             tables_map: dict[str, TableIR] = {}
             for obj in db_objects:
                 if obj.object_type == "TABLE":
-                    cols = (
-                        db.query(DbColumn)
-                        .filter(DbColumn.db_object_id == obj.id)
-                        .order_by(DbColumn.ordinal_position)
-                        .all()
-                    )
-                    tables_map[obj.fqn] = TableIR(
-                        database=obj.database_name,
-                        schema_name=obj.schema_name,
-                        name=obj.object_name,
-                        columns=[
-                            ColumnIR(
-                                name=c.column_name,
-                                data_type=c.data_type,
-                                nullable=c.nullable,
-                                is_primary_key=c.is_primary_key,
-                                is_foreign_key=c.is_foreign_key,
-                                fk_target=c.fk_target,
-                                ordinal_position=c.ordinal_position,
-                            )
-                            for c in cols
-                        ],
-                        row_count=obj.row_count,
-                    )
+                    tables_map[obj.fqn] = table_ir_from_db(db, obj)
 
             generated_files: list[GeneratedFile] = []
             compile_ok = 0
@@ -148,31 +124,6 @@ class ConvertEngine:
             if allowed_keys is not None:
                 res_q = res_q.filter(ResidueItem.object_key.in_(allowed_keys))
             res_q.delete(synchronize_session=False)
-
-            # Generate DDLs for tables in scope
-            for fqn, tbl_ir in tables_map.items():
-                if allowed_keys is not None and fqn not in allowed_keys:
-                    continue
-                ddl_file = generator.generate_ddl(tbl_ir, cfg)
-                generated_files.append(ddl_file)
-                self._upsert_generated_artifact(
-                    db, run_row.id, project_id, cfg.target.platform, ddl_file, actor
-                )
-                if ddl_file.compile_passed:
-                    compile_ok += 1
-                    StateMachine.advance(
-                        db,
-                        project_id,
-                        fqn,
-                        "table",
-                        ObjectState.CONVERTED,
-                        actor,
-                        "conversion_run",
-                        run_row.id,
-                    )
-                else:
-                    compile_fail += 1
-                    StateMachine.set_blocker(db, project_id, fqn, ddl_file.compile_log)
 
             # Reviewer decisions, keyed by the component's stable id; the latest decision wins.
             # An approval without code means "accepted as not needed" and suppresses the item.
@@ -196,6 +147,56 @@ class ConvertEngine:
                 s.object_key: s.object_kind
                 for s in db.query(ObjectStatus).filter(ObjectStatus.project_id == project_id)
             }
+
+            # Generate DDLs for tables in scope
+            for fqn, tbl_ir in tables_map.items():
+                if allowed_keys is not None and fqn not in allowed_keys:
+                    continue
+                ddl_file = generator.generate_ddl(tbl_ir, cfg)
+                generated_files.append(ddl_file)
+                self._upsert_generated_artifact(
+                    db, run_row.id, project_id, cfg.target.platform, ddl_file, actor
+                )
+                approved = accepted_map.get(fqn, {})
+                open_notes = [n for n in ddl_file.review_notes if n.component_key not in approved]
+                for note in open_notes:
+                    residue_opened += 1
+                    db.add(
+                        ResidueItem(
+                            conversion_run_id=run_row.id,
+                            project_id=project_id,
+                            object_key=fqn,
+                            component_key=note.component_key,
+                            component_name=note.component_name,
+                            reason_code=note.reason_code,
+                            reason_detail=note.reason_detail,
+                            original_snippet=note.original_snippet,
+                            status="open",
+                            created_by=actor,
+                        )
+                    )
+                if open_notes:
+                    StateMachine.set_blocker(
+                        db,
+                        project_id,
+                        fqn,
+                        f"{len(open_notes)} type mapping(s) awaiting review",
+                    )
+                elif ddl_file.compile_passed:
+                    compile_ok += 1
+                    StateMachine.advance(
+                        db,
+                        project_id,
+                        fqn,
+                        "table",
+                        ObjectState.CONVERTED,
+                        actor,
+                        "conversion_run",
+                        run_row.id,
+                    )
+                else:
+                    compile_fail += 1
+                    StateMachine.set_blocker(db, project_id, fqn, ddl_file.compile_log)
 
             # Generate code from persisted Neutral IR flows (never raw files!)
             flows = db.query(IrFlow).filter(IrFlow.project_id == project_id).all()

@@ -35,6 +35,9 @@ class ColumnIR(BaseModel):
     fk_target: str | None = None
     default_expr: str | None = None
     ordinal_position: int = 0
+    # Behaviour the type alone doesn't say: unicode, case_insensitive (Teradata NOT
+    # CASESPECIFIC), format (Teradata FORMAT '...').
+    attributes: dict[str, Any] = Field(default_factory=dict)
 
 
 class TableIR(BaseModel):
@@ -48,6 +51,8 @@ class TableIR(BaseModel):
     source_sql: str | None = None
     usage_reads_30d: int = 0
     is_dead_candidate: bool = False
+    # e.g. {"key_source": "UNIQUE PRIMARY INDEX"} when the row key isn't a declared primary key
+    attributes: dict[str, Any] = Field(default_factory=dict)
 
     @property
     def fqn(self) -> str:

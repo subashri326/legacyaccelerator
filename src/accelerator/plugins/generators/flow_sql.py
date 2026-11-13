@@ -17,11 +17,17 @@ from typing import TYPE_CHECKING
 
 import sqlglot
 from sqlglot import exp
-from sqlglot.errors import SqlglotError
+from sqlglot.errors import ErrorLevel, SqlglotError
 
 from accelerator.config.client_config import ClientConfig
-from accelerator.ir.expressions import DIALECT_MAP, ExpressionConverter, ExpressionNotPortable
+from accelerator.ir.expressions import (
+    DIALECT_MAP,
+    ExpressionConverter,
+    ExpressionNotPortable,
+    _portable_tree,
+)
 from accelerator.ir.models import DataFlowGraphIR, NodeIR, NodeOperator, PackageIR, TableIR
+from accelerator.plugins.generators.legacy_sql import apply_source_semantics
 from accelerator.plugins.interfaces import GeneratedResidue
 
 if TYPE_CHECKING:
@@ -160,7 +166,8 @@ class SqlRenderer:
             tbl.set("this", exp.to_identifier(ph))
             tbl.set("db", None)
             tbl.set("catalog", None)
-        out = tree.sql(dialect=self.dialect, pretty=True)
+        tree = _portable_tree(tree, self.dialect)
+        out = tree.sql(dialect=self.dialect, pretty=True, unsupported_level=ErrorLevel.RAISE)
         for ph, rel in replacements.items():
             out = re.sub(rf'["`\[]?{ph}["`\]]?', lambda _m, r=rel: r, out, flags=re.IGNORECASE)
         return out, sorted(set(unknown))
@@ -837,8 +844,23 @@ def render_sql_tasks(
                 )
             )
             continue
+        source_db = {"tsql": "sqlserver", "oracle": "oracle", "teradata": "teradata"}.get(
+            DIALECT_MAP.get(read_dialect, read_dialect)
+        )
         for s_idx, stmt in enumerate(stmts, start=1):
             suffix = f"{idx}" if len(stmts) == 1 else f"{idx}_{s_idx}"
+            if source_db is not None:
+                # Make the legacy database's meaning explicit (NULL rules, date arithmetic,
+                # integer division...) or flag what can't be made exact.
+                stmt, findings = apply_source_semantics(stmt, source_db, renderer.resolver.find)
+                if findings:
+                    for code, detail in findings:
+                        res.residues.append(
+                            GeneratedResidue(
+                                package.id, task.name, code, detail, stmt.sql(), task.id
+                            )
+                        )
+                    continue
             try:
                 if (
                     isinstance(stmt, exp.Create)
@@ -846,7 +868,18 @@ def render_sql_tasks(
                     and stmt.expression
                 ):
                     view = stmt.this.this if isinstance(stmt.this, exp.Schema) else stmt.this
-                    sql, unknown = renderer.rewrite_sql(stmt.expression, "neutral")
+                    body = stmt.expression.copy()
+                    if isinstance(stmt.this, exp.Schema) and isinstance(body, exp.Select):
+                        names = [c.name for c in stmt.this.expressions]
+                        if len(names) == len(body.expressions):
+                            body.set(
+                                "expressions",
+                                [
+                                    exp.alias_(e.unalias(), renderer.col(n))
+                                    for e, n in zip(body.expressions, names, strict=True)
+                                ],
+                            )
+                    sql, unknown = renderer.rewrite_sql(body, "neutral")
                     res.models.append(GeneratedModel(safe_name(view.name), None, sql))
                 elif isinstance(stmt, exp.Insert) and isinstance(stmt.expression, exp.Query):
                     target = stmt.this.this if isinstance(stmt.this, exp.Schema) else stmt.this

@@ -26,6 +26,11 @@ def parse_ddl_to_catalog(
     database_name: str = "legacy_db",
 ) -> CatalogIR:
     """Parse offline SQL DDL/view/procedure script into CatalogIR using sqlglot + pattern extraction."""
+    if dialect in ("oracle", "teradata"):
+        # Vendor exports carry storage/physical options a general SQL parser rejects.
+        from accelerator.plugins.collectors.ddl_reader import read_ddl_export
+
+        return read_ddl_export(ddl_text, source_system, dialect, database_name)
     tables: list[TableIR] = []
     views: list[ViewIR] = []
     procedures: list[ProcedureIR] = []

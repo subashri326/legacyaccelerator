@@ -41,12 +41,14 @@ dependencies = [
 # Database drivers, one extra per engine; `connectors` installs them all.
 sqlserver = ["pyodbc>=5.1.0"]  # SQL Server and Microsoft Fabric (needs Microsoft ODBC Driver 18)
 oracle = ["oracledb>=2.4.0"]
+teradata = ["teradatasqlalchemy>=20.0.0.9"]
 snowflake = ["snowflake-sqlalchemy>=1.7.0", "snowflake-connector-python[pandas]>=3.12.0"]
 databricks = ["databricks-sqlalchemy>=2.0.0"]
 cloud-storage = ["boto3>=1.35.0", "azure-storage-blob>=12.22.0"]
 connectors = [
     "pyodbc>=5.1.0",
     "oracledb>=2.4.0",
+    "teradatasqlalchemy>=20.0.0.9",
     "snowflake-sqlalchemy>=1.7.0",
     "snowflake-connector-python[pandas]>=3.12.0",
     "databricks-sqlalchemy>=2.0.0",

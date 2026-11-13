@@ -1,0 +1,30 @@
+client: acme_teradata
+project: teradata_edw
+environment: dev
+
+source:
+  database: teradata
+  etl: sql
+  connection: vault://acme/teradata-ro
+  catalog_bundle_path: examples/teradata_edw/teradata_export.sql
+  etl_export_paths:
+    - examples/teradata_edw/bteq
+
+target:
+  platform: snowflake
+  output: dbt
+  connection: vault://acme/teradata-target
+
+naming:
+  schema: "{layer}_{source_schema}"
+  table_case: upper
+  column_case: lower
+  layer_default: curated
+
+reconciliation:
+  default_level: L2
+  numeric_tolerance: 0.0
+
+movement:
+  mover: parquet
+  partition_size_rows: 25
