@@ -134,7 +134,12 @@ class EdgeIR(BaseModel):
     source_node_id: str
     target_node_id: str
     branch_name: str = "default"
+    # Column-level wiring {"from": upstream column, "to": downstream column}. Used when a tool
+    # renames columns between steps (Informatica ports, DataStage links).
     column_lineage: list[dict[str, str]] = Field(default_factory=list)
+    # "keep": pass every upstream column on, adding the renamed ones.
+    # "strict": pass only the wired columns (the downstream step sees nothing else).
+    projection: str = "keep"
 
 
 class DataFlowGraphIR(BaseModel):
@@ -144,11 +149,14 @@ class DataFlowGraphIR(BaseModel):
     edges: list[EdgeIR] = Field(default_factory=list)
 
     def source_tables(self) -> list[str]:
-        return [
-            n.table_ref
-            for n in self.nodes
-            if n.operator in (NodeOperator.SOURCE, NodeOperator.LOOKUP) and n.table_ref
-        ]
+        out: list[str] = []
+        for n in self.nodes:
+            if n.operator not in (NodeOperator.SOURCE, NodeOperator.LOOKUP):
+                continue
+            out += [str(t) for t in n.metadata.get("source_tables") or []]  # query-based sources
+            if n.table_ref:
+                out.append(n.table_ref)
+        return list(dict.fromkeys(out))
 
     def target_tables(self) -> list[str]:
         return [

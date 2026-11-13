@@ -3,14 +3,110 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
 import sqlglot
 from sqlglot import exp
-from sqlglot.errors import SqlglotError
+from sqlglot.errors import ErrorLevel, SqlglotError
 
+from accelerator.ir.etl_expressions import Scope, Untranslatable, translate
 from accelerator.ir.models import ExpressionIR
+
+
+class ExpressionNotPortable(ValueError):
+    """The expression has no exact equivalent on the chosen target platform."""
+
+
+# Functions with no exact equivalent in Fabric / SQL Server T-SQL.
+_TSQL_UNSUPPORTED: tuple[type[exp.Expression], ...] = (
+    exp.Pad,
+    exp.Initcap,
+    exp.StrToTime,
+    exp.StrToDate,
+    exp.RegexpReplace,
+    exp.SplitPart,
+    exp.Interval,
+)
+
+
+def _interval_amount(node: exp.Expression) -> tuple[exp.Expression, str] | None:
+    """Match `INTERVAL '1 DAY'`, `n * INTERVAL '1 DAY'` or `INTERVAL '1 DAY' * n`."""
+    if isinstance(node, exp.Paren):
+        return _interval_amount(node.this)
+    if isinstance(node, exp.Interval):
+        unit = node.text("unit").upper()
+        value = node.this.name if isinstance(node.this, exp.Literal) else ""
+        parts = value.split()
+        if len(parts) == 2 and not unit:
+            return exp.Literal.number(parts[0]), parts[1].upper()
+        if unit and re.fullmatch(r"-?\d+", value):
+            return exp.Literal.number(value), unit
+        return None
+    if isinstance(node, exp.Mul):
+        for amount, iv in ((node.this, node.expression), (node.expression, node.this)):
+            m = _interval_amount(iv)
+            if m and m[0].name == "1":
+                return amount.unnest(), m[1]
+    return None
+
+
+def _portable_tree(tree: exp.Expression, dialect: str) -> exp.Expression:
+    """Rewrite neutral constructs into forms each target executes the same way."""
+
+    def fix(node: exp.Expression) -> exp.Expression:
+        if isinstance(node, (exp.Add, exp.Sub)):
+            m = _interval_amount(node.expression)
+            if m:
+                amount, unit = m
+                if isinstance(node, exp.Sub):
+                    amount = exp.Neg(this=exp.Paren(this=amount))
+                return exp.DateAdd(this=node.this, expression=amount, unit=exp.var(unit))
+        if dialect == "tsql" and isinstance(node, exp.DPipe):
+            # T-SQL `+` is ambiguous between addition and concatenation; CONCAT is not, but it
+            # treats NULL as '' where `||` gives NULL - so NULL is restored explicitly.
+            parts: list[exp.Expression] = []
+
+            def flat(e: exp.Expression) -> None:
+                if isinstance(e, exp.DPipe):
+                    flat(e.this)
+                    flat(e.expression)
+                else:
+                    parts.append(e.unnest())
+
+            flat(node)
+            concat = exp.Anonymous(this="CONCAT", expressions=parts)
+            nullable = [
+                p for p in parts
+                if not (isinstance(p, exp.Literal) and p.is_string)
+                and not (isinstance(p, exp.Coalesce) and p.expressions
+                         and isinstance(p.expressions[-1], exp.Literal))
+            ]  # fmt: skip
+            if not nullable:
+                return concat
+            any_null = exp.or_(*(exp.Is(this=p.copy(), expression=exp.Null()) for p in nullable))
+            return exp.Case(ifs=[exp.If(this=any_null, true=exp.Null())], default=concat)
+        if dialect == "tsql" and isinstance(node, exp.Length):
+            # T-SQL LEN ignores trailing spaces; every other tool counts them.
+            plus_x = exp.Add(this=node.this, expression=exp.Literal.string("x"))
+            return exp.Paren(
+                this=exp.Sub(
+                    this=exp.Anonymous(this="LEN", expressions=[plus_x]),
+                    expression=exp.Literal.number(1),
+                )
+            )
+        return node
+
+    out = tree.transform(fix)
+    if dialect == "tsql":
+        bad = next(iter(out.find_all(*_TSQL_UNSUPPORTED)), None)
+        if bad is not None:
+            raise ExpressionNotPortable(
+                f"{bad.key.upper()} has no exact equivalent on SQL Server / Fabric"
+            )
+    return out
+
 
 DIALECT_MAP: dict[str, str] = {
     "tsql": "tsql",
@@ -175,6 +271,25 @@ class ExpressionConverter:
         source_dialect: str,
         target_column: str | None = None,
     ) -> ExpressionIR:
+        if source_dialect.lower() in ("informatica", "datastage"):
+            try:
+                sql, _ = translate(raw_expr, source_dialect, Scope(loose=True))
+            except Untranslatable as exc:
+                return ExpressionIR(
+                    id=expr_id,
+                    target_column=target_column,
+                    original_expr=raw_expr,
+                    source_dialect=source_dialect,
+                    is_opaque=True,
+                    opaque_reason=str(exc),
+                )
+            return ExpressionIR(
+                id=expr_id,
+                target_column=target_column,
+                original_expr=raw_expr,
+                source_dialect=source_dialect,
+                neutral_sql=sql,
+            )
         cleaned = normalize_etl_expression(raw_expr, source_dialect)
         dialect_key = DIALECT_MAP.get(source_dialect.lower(), "tsql")
         try:
@@ -203,12 +318,27 @@ class ExpressionConverter:
             )
 
     @staticmethod
-    def render_target(neutral_sql: str, target_platform: str) -> str:
+    def render_target(
+        neutral_sql: str,
+        target_platform: str,
+        column_namer: Callable[[str], str] | None = None,
+    ) -> str:
+        """Render neutral SQL for a target; raises ExpressionNotPortable if it can't be exact."""
         if not neutral_sql.strip():
             return ""
         target_dialect = DIALECT_MAP.get(target_platform.lower(), target_platform.lower())
-        parsed = sqlglot.parse_one(neutral_sql, read="postgres")
-        return parsed.sql(dialect=target_dialect)
+        try:
+            parsed = sqlglot.parse_one(neutral_sql, read="postgres")
+            if column_namer is not None:
+                for col in parsed.find_all(exp.Column):
+                    if not col.table:
+                        col.set("this", exp.to_identifier(column_namer(col.name)))
+            parsed = _portable_tree(parsed, target_dialect)
+            return parsed.sql(dialect=target_dialect, unsupported_level=ErrorLevel.RAISE)
+        except ExpressionNotPortable:
+            raise
+        except (SqlglotError, ValueError) as exc:
+            raise ExpressionNotPortable(f"Cannot render for {target_platform}: {exc}") from exc
 
     @staticmethod
     def transpile_sql(
