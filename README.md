@@ -34,6 +34,22 @@ l2c serve --port 8000
 l2c ui --port 8501
 ```
 
+## What the ETL readers convert, and what they flag
+
+Each reader converts only what it can reproduce exactly; everything else becomes a review item
+(never a guess). The Acme demo proves the converted jobs return the same rows as the legacy logic
+on all three targets (`tests/test_conversion_correctness.py`, `tests/test_etl_tools_correctness.py`).
+
+| Tool | Converted | Flagged for review |
+|---|---|---|
+| **SSIS** | sources, derived columns, conditional split (first match), lookups, union, sort, aggregate, destinations | script tasks/components, unknown components |
+| **Informatica PowerCenter** (XML export) | source qualifiers (filter, user join, distinct, SQL override), expressions incl. variable ports, filter, router (every matching group), connected lookups (with source filter), joiner (normal/master/detail/full), aggregator, sorter, union, session overrides, workflow order | Update Strategy, Sequence Generator, mapplets, normalizer, stored procedures, unconnected lookups, `$$` parameters, Command/Decision/Email tasks |
+| **IBM DataStage** (.dsx or XML export) | DB connector sources/targets, Transformer (constraints, derivations, stage variables, otherwise links), Lookup (continue/drop/fail), Join (inner/left/right), Aggregator, Funnel, Sort, Remove Duplicates, Copy, single-condition Filter, sequence job order | Modify, Merge, Change Capture, SCD, generators, file/data-set stages, containers, update/upsert writes, `#job parameters#`, row-to-row stage variables |
+
+Expression functions are translated one by one with their exact rules (for example,
+Informatica `||` ignores NULLs, DataStage `Trim()` also collapses inner spaces). A function a
+target cannot run exactly (e.g. `LPAD` on Fabric) is flagged for that target only.
+
 ## Docker Compose & Kubernetes Helm
 
 ```bash

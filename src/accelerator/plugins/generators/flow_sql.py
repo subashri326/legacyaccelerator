@@ -20,7 +20,7 @@ from sqlglot import exp
 from sqlglot.errors import SqlglotError
 
 from accelerator.config.client_config import ClientConfig
-from accelerator.ir.expressions import DIALECT_MAP, ExpressionConverter
+from accelerator.ir.expressions import DIALECT_MAP, ExpressionConverter, ExpressionNotPortable
 from accelerator.ir.models import DataFlowGraphIR, NodeIR, NodeOperator, PackageIR, TableIR
 from accelerator.plugins.interfaces import GeneratedResidue
 
@@ -95,6 +95,13 @@ class SqlRenderer:
         self.cfg = config
         self.resolver = TableResolver(tables)
         self.dialect = DIALECT_MAP.get(gen.platform, gen.platform)
+        # Dialect of SQL written for the legacy database (source queries, filters).
+        self.source_dialect = {
+            "sqlserver": "tsql",
+            "oracle": "oracle",
+            "teradata": "teradata",
+            "postgres": "postgres",
+        }.get(config.source.database, "tsql")
 
     def col(self, name: str) -> str:
         return self.gen.resolve_column_name(name, self.cfg)
@@ -111,7 +118,20 @@ class SqlRenderer:
         return [self.col(c.name) for c in sorted(table.columns, key=lambda c: c.ordinal_position)]
 
     def expr(self, neutral_sql: str) -> str:
-        return ExpressionConverter.render_target(neutral_sql, self.gen.platform)
+        """Render a neutral expression; raises ExpressionNotPortable if the target can't match it."""
+        return ExpressionConverter.render_target(neutral_sql, self.gen.platform, self.col)
+
+    def condition_sql(self, text: str, read: str) -> str:
+        """Render a SQL condition written in the source database's dialect (e.g. a source filter).
+
+        Table qualifiers are dropped: the condition is applied to a single relation.
+        """
+        tree = sqlglot.parse_one(text, read=DIALECT_MAP.get(read, read))
+        for col in tree.find_all(exp.Column):
+            col.set("table", None)
+            col.set("db", None)
+            col.set("catalog", None)
+        return self.expr(tree.sql(dialect="postgres"))
 
     def rewrite_sql(self, sql: str | exp.Expression, read: str) -> tuple[str, list[str]]:
         """Render SQL for the target, pointing table references at migrated tables.
@@ -212,15 +232,60 @@ class FlowSqlBuilder:
                 continue
             branches = self.out[e.source_node_id]
             if len(branches) == 1:
-                rels.append(next(iter(branches.values())))
-                continue
-            src = self.nodes[e.source_node_id]
-            if src.operator == NodeOperator.LOOKUP:
-                is_no_match = "no match" in e.branch_name.lower()
-                rels.append(branches[NO_MATCH_BRANCH if is_no_match else DEFAULT_BRANCH])
+                rel = next(iter(branches.values()))
             else:
-                rels.append(branches.get(e.branch_name, branches[DEFAULT_BRANCH]))
+                src = self.nodes[e.source_node_id]
+                if src.operator == NodeOperator.LOOKUP:
+                    is_no_match = "no match" in e.branch_name.lower()
+                    rel = branches[NO_MATCH_BRANCH if is_no_match else DEFAULT_BRANCH]
+                else:
+                    rel = branches.get(e.branch_name, branches[DEFAULT_BRANCH])
+            if e.column_lineage and node.operator != NodeOperator.TARGET:
+                rel = self._project(node, rel, e.column_lineage, e.projection == "strict")
+            rels.append(rel)
         return rels
+
+    def _project(self, node: NodeIR, rel: Rel, lineage: list[dict[str, str]], strict: bool) -> Rel:
+        """Apply column renames on an edge (Informatica ports / DataStage link columns)."""
+        pairs = list(dict.fromkeys((self.r.col(m["from"]), self.r.col(m["to"])) for m in lineage))
+        if rel.columns is not None:
+            missing = sorted({f for f, _ in pairs if f not in rel.columns})
+            if missing:
+                self._residue(
+                    node,
+                    "COLUMN_NOT_PRODUCED",
+                    f"'{node.name}' reads columns the previous step does not produce: {missing}",
+                    key=f"{node.id}:inputs",
+                )
+                pairs = [(f, t) for f, t in pairs if f not in missing]
+        if not strict and all(f == t for f, t in pairs):
+            return rel
+        targets = [t for _, t in pairs]
+        parts = [f if f == t else f"{f} AS {t}" for f, t in pairs]
+        if strict:
+            cols: list[str] | None = list(dict.fromkeys(targets))
+        elif rel.columns is None:
+            parts = ["*", *(p for p, (f, t) in zip(parts, pairs, strict=True) if f != t)]
+            cols = None
+        else:
+            keep = [c for c in rel.columns if c not in targets]
+            parts = keep + parts
+            cols = keep + targets
+        return self._add(f"{node.name}_in", f"SELECT {', '.join(parts)} FROM {rel.name}", cols)
+
+    def _render(self, node: NodeIR, neutral_sql: str, what: str, key: str | None = None) -> str:
+        """Render an expression for the target, or raise a review item and return None-marker."""
+        try:
+            return self.r.expr(neutral_sql)
+        except ExpressionNotPortable as exc:
+            self._residue(
+                node,
+                "EXPRESSION_NOT_PORTABLE",
+                f"{what} cannot be expressed exactly on {self.r.gen.platform}: {exc}",
+                neutral_sql,
+                key=key,
+            )
+            raise
 
     def _order(self) -> list[NodeIR]:
         ups: dict[str, list[str]] = {n.id: [] for n in self.flow.nodes}
@@ -290,7 +355,9 @@ class FlowSqlBuilder:
     def _op_source(self, node: NodeIR, _inputs: list[Rel]) -> None:
         if node.sql_query:
             try:
-                sql, unknown = self.r.rewrite_sql(node.sql_query, "tsql")
+                sql, unknown = self.r.rewrite_sql(
+                    node.sql_query, str(node.metadata.get("sql_dialect") or self.r.source_dialect)
+                )
             except (SqlglotError, ValueError) as exc:
                 self._residue(node, "SOURCE_QUERY_UNPARSED", str(exc), node.sql_query)
                 return
@@ -301,8 +368,13 @@ class FlowSqlBuilder:
                     f"Source query reads tables not in the catalog: {unknown}",
                     node.sql_query,
                 )
+            cols = (
+                [self.r.col(c.name) for c in node.output_columns]
+                if node.metadata.get("query_columns_aligned")
+                else None
+            )
             self.out[node.id] = {
-                DEFAULT_BRANCH: self._add(node.name, sql.replace("\n", "\n    "), None)
+                DEFAULT_BRANCH: self._add(node.name, sql.replace("\n", "\n    "), cols)
             }
             return
         table = self.r.resolver.find(node.table_ref)
@@ -332,11 +404,14 @@ class FlowSqlBuilder:
             self._passthrough(node, inputs)
             return
         inp = inputs[0]
+        try:
+            where = _true(self._render(node, cond.neutral_sql, "Filter condition"))
+        except ExpressionNotPortable:
+            self._passthrough(node, inputs)
+            return
         self.out[node.id] = {
             DEFAULT_BRANCH: self._add(
-                node.name,
-                f"SELECT {self._cols(inp)} FROM {inp.name} WHERE {_true(self.r.expr(cond.neutral_sql))}",
-                inp.columns,
+                node.name, f"SELECT {self._cols(inp)} FROM {inp.name} WHERE {where}", inp.columns
             )
         }
 
@@ -364,7 +439,12 @@ class FlowSqlBuilder:
                 )
                 derived[col] = "NULL"
                 continue
-            derived[col] = self.r.expr(e.neutral_sql)
+            try:
+                derived[col] = self._render(
+                    node, e.neutral_sql, f"Column '{col}'", key=f"{node.id}:{col}"
+                )
+            except ExpressionNotPortable:
+                derived[col] = "NULL"
         if inp.columns is None:
             proj = ", ".join(["*", *(f"{sql} AS {c}" for c, sql in derived.items())])
             cols = None
@@ -385,9 +465,20 @@ class FlowSqlBuilder:
             )
             self._passthrough(node, inputs)
             return
-        # SSIS Conditional Split sends a row to the FIRST matching output; Informatica Router to ALL.
-        first_match = self.pkg.source_tool == "ssis"
-        conds = [(r["name"], self.r.expr(r["condition"])) for r in node.routes]
+        # SSIS Conditional Split sends a row to the FIRST matching output; Informatica Router and
+        # DataStage Transformer links send it to EVERY matching output.
+        semantics = node.metadata.get("route_semantics")
+        first_match = (
+            semantics or ("first" if self.pkg.source_tool == "ssis" else "all")
+        ) == "first"
+        try:
+            conds = [
+                (r["name"], self._render(node, r["condition"], f"Route '{r['name']}'"))
+                for r in node.routes
+            ]
+        except ExpressionNotPortable:
+            self._passthrough(node, inputs)
+            return
         branches: dict[str, Rel] = {}
         for i, (name, cond) in enumerate(conds):
             preds = [_true(cond)]
@@ -438,28 +529,64 @@ class FlowSqlBuilder:
             )
             self._passthrough(node, inputs)
             return
+        if inp.columns is not None:
+            missing_in = [
+                k["left"] for k in node.join_keys if self.r.col(k["left"]) not in inp.columns
+            ]
+            if missing_in:
+                self._residue(
+                    node,
+                    "LOOKUP_COLUMN_UNKNOWN",
+                    f"Lookup input columns are not produced by the flow: {missing_in}",
+                )
+                self._passthrough(node, inputs)
+                return
+        ref_where = ""
+        if node.metadata.get("reference_filter"):
+            try:
+                ref_where = " WHERE " + _true(
+                    self.r.condition_sql(
+                        str(node.metadata["reference_filter"]),
+                        str(node.metadata.get("sql_dialect") or self.r.source_dialect),
+                    )
+                )
+            except (SqlglotError, ValueError) as exc:
+                self._residue(
+                    node,
+                    "LOOKUP_FILTER_UNCONVERTED",
+                    f"Lookup source filter could not be converted: {exc}",
+                    str(node.metadata["reference_filter"]),
+                )
+                self._passthrough(node, inputs)
+                return
         rk = [self.r.col(k["right"]) for k in node.join_keys]
         keep = list(dict.fromkeys(rk + [self.r.col(c["reference"]) for c in copies]))
-        # Legacy lookups return one reference row per key; dedupe so a join can't multiply rows.
-        ref = self._add(
-            f"{node.name}_ref",
-            f"SELECT {', '.join(keep)} FROM (SELECT {', '.join(keep)}, ROW_NUMBER() OVER "
-            f"(PARTITION BY {', '.join(rk)} ORDER BY {', '.join(rk)}) AS l2c_rn "
-            f"FROM {self.r.relation(ref_table)}) d WHERE l2c_rn = 1",
-            keep,
-        )
+        # Legacy lookups return one reference row per key; dedupe so a join can't multiply rows
+        # (unless the lookup is configured to return every match).
+        if node.metadata.get("return_all_matches"):
+            ref_sql = f"SELECT {', '.join(keep)} FROM {self.r.relation(ref_table)}{ref_where}"
+        else:
+            ref_sql = (
+                f"SELECT {', '.join(keep)} FROM (SELECT {', '.join(keep)}, ROW_NUMBER() OVER "
+                f"(PARTITION BY {', '.join(rk)} ORDER BY {', '.join(rk)}) AS l2c_rn "
+                f"FROM {self.r.relation(ref_table)}{ref_where}) d WHERE l2c_rn = 1"
+            )
+        ref = self._add(f"{node.name}_ref", ref_sql, keep)
         on = " AND ".join(
             f"i.{self.r.col(k['left'])} = r.{self.r.col(k['right'])}" for k in node.join_keys
         )
         ignore_failure = (
             str(node.metadata.get("error_row_disposition", "")).lower() == "ignorefailure"
+            or node.metadata.get("on_no_match") == "keep"
         )
         join = "LEFT JOIN" if ignore_failure else "INNER JOIN"
+        aliases = [self.r.col(c["alias"]) for c in copies]
         copy_proj = [f"r.{self.r.col(c['reference'])} AS {self.r.col(c['alias'])}" for c in copies]
-        proj = ", ".join([self._cols(inp, "i."), *copy_proj])
-        out_cols = (
-            None if inp.columns is None else inp.columns + [self.r.col(c["alias"]) for c in copies]
-        )
+        # A looked-up column replaces an input column of the same name.
+        kept_in = None if inp.columns is None else [c for c in inp.columns if c not in aliases]
+        in_proj = self._cols(inp, "i.") if kept_in is None else ", ".join(f"i.{c}" for c in kept_in)
+        proj = ", ".join(p for p in [in_proj, *copy_proj] if p)
+        out_cols = None if kept_in is None else kept_in + aliases
         note = (
             ""
             if ignore_failure or node.metadata.get("no_match_output")
@@ -521,10 +648,20 @@ class FlowSqlBuilder:
             return
         inp = inputs[0]
         groups = [self.r.col(g) for g in node.group_by_columns]
-        parts = groups + [
-            f"{a['func'].upper()}({self.r.col(a['column']) if a.get('column') else '*'}) AS {self.r.col(a['alias'])}"
-            for a in aggs
-        ]  # type: ignore[index]
+        parts = list(groups)
+        for a in aggs:  # type: ignore[union-attr]
+            alias = self.r.col(a["alias"])
+            if a.get("sql"):  # a full aggregate expression in neutral SQL
+                try:
+                    body = self._render(
+                        node, a["sql"], f"Aggregate '{alias}'", f"{node.id}:{alias}"
+                    )
+                except ExpressionNotPortable:
+                    self._passthrough(node, inputs)
+                    return
+            else:
+                body = f"{a['func'].upper()}({self.r.col(a['column']) if a.get('column') else '*'})"
+            parts.append(f"{body} AS {alias}")
         group_sql = f" GROUP BY {', '.join(groups)}" if groups else ""
         cols = groups + [self.r.col(a["alias"]) for a in aggs]  # type: ignore[index]
         self.out[node.id] = {
@@ -547,9 +684,18 @@ class FlowSqlBuilder:
             return
         inp = inputs[0]
         keys = ", ".join(self.r.col(k) for k in node.dedup_keys)
+        # Which duplicate survives: the legacy sort order when known (else any - all are equal
+        # on the keys, and the parser only allows that when no other column is kept).
+        order = (
+            ", ".join(
+                f"{self.r.col(o['column'])} {o.get('direction', 'ASC')}"
+                for o in node.metadata.get("order_by") or []  # type: ignore[union-attr]
+            )
+            or keys
+        )
         body = (
             f"SELECT {self._cols(inp)} FROM (SELECT {self._cols(inp)}, ROW_NUMBER() OVER "
-            f"(PARTITION BY {keys} ORDER BY {keys}) AS l2c_rn FROM {inp.name}) d WHERE l2c_rn = 1"
+            f"(PARTITION BY {keys} ORDER BY {order}) AS l2c_rn FROM {inp.name}) d WHERE l2c_rn = 1"
         )
         self.out[node.id] = {DEFAULT_BRANCH: self._add(node.name, body, inp.columns)}
 
