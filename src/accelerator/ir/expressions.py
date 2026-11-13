@@ -63,6 +63,12 @@ def _portable_tree(tree: exp.Expression, dialect: str) -> exp.Expression:
                 if isinstance(node, exp.Sub):
                     amount = exp.Neg(this=exp.Paren(this=amount))
                 return exp.DateAdd(this=node.this, expression=amount, unit=exp.var(unit))
+        if dialect == "tsql" and isinstance(node, exp.IntDiv):
+            # Integer division that reads the same on any engine: (a - a % b) / b is an exact
+            # multiple divided by b, so no engine can turn it into a fraction.
+            a, b = node.this, node.expression
+            exact = exp.Sub(this=a.copy(), expression=exp.Mod(this=a.copy(), expression=b.copy()))
+            return exp.Div(this=exp.Paren(this=exact), expression=b, typed=True)
         if dialect == "tsql" and isinstance(node, exp.DPipe):
             # T-SQL `+` is ambiguous between addition and concatenation; CONCAT is not, but it
             # treats NULL as '' where `||` gives NULL - so NULL is restored explicitly.

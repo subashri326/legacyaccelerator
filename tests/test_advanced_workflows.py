@@ -28,11 +28,14 @@ def test_sql_parsers_and_vendor_wrappers() -> None:
     .LOGON tdprod/user,pwd;
     INSERT INTO edw.cust_dim SELECT cust_id, cust_name FROM stg.cust WHERE active_flag = 1;
     .IF ERRORCODE <> 0 THEN .QUIT 8;
+    .EXPORT REPORT FILE = /tmp/cust.txt
     .LOGOFF;
     """
     bteq_pkg = reg.get_parser("bteq").parse_artifact("load_cust.bteq", bteq_script)
     assert len(bteq_pkg.data_flows) == 1
-    assert any(o.reason_code == "BTEQ_CONTROL_FLOW" for o in bteq_pkg.opaque_items)
+    # stop-on-error is how converted steps run anyway; exporting a file needs a person
+    assert [o.reason_code for o in bteq_pkg.opaque_items] == ["BTEQ_COMMAND"]
+    assert ".EXPORT" in bteq_pkg.opaque_items[0].original_snippet
 
     plsql_script = b"""
     INSERT INTO finance.summary SELECT acct_id, SUM(amt) FROM finance.txns GROUP BY acct_id;

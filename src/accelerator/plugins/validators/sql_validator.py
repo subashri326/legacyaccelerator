@@ -16,7 +16,7 @@ Levels
 from __future__ import annotations
 
 import math
-from datetime import date, datetime, time
+from datetime import UTC, date, datetime, time
 from decimal import Decimal
 from typing import Any
 
@@ -44,6 +44,8 @@ NUMERIC_TYPES = {
     "SMALLMONEY",
     "NUMBER",
     "BYTEINT",
+    "BINARY_FLOAT",
+    "BINARY_DOUBLE",
 }
 INTEGER_TYPES = {"INT", "INTEGER", "BIGINT", "SMALLINT", "TINYINT", "BYTEINT"}
 BOOL_TYPES = {"BIT", "BOOLEAN", "BOOL"}
@@ -95,6 +97,8 @@ def _norm(v: Any) -> Any:
     if isinstance(v, (int, float, Decimal)):
         return float(v)
     if isinstance(v, datetime):
+        if v.tzinfo is not None:  # compare instants: engines return different offsets
+            v = v.astimezone(UTC)
         return v.replace(tzinfo=None).isoformat(sep=" ")
     if isinstance(v, (date, time)):
         return v.isoformat()
@@ -170,7 +174,14 @@ def _profile(
                 parts.append(exp.Sum(this=exp.cast(c, "DOUBLE")))
                 names.append(f"sum:{col.name}")
             elif kind == "string":
-                parts.append(exp.Sum(this=exp.Length(this=c)))
+                # Trailing spaces are ignored: CHAR padding differs between engines.
+                trimmed = exp.Trim(this=c, position="TRAILING")
+                length: exp.Expression = (
+                    exp.Anonymous(this="CHARACTER_LENGTH", expressions=[trimmed])
+                    if conn.dialect == "teradata"
+                    else exp.Length(this=trimmed)
+                )
+                parts.append(exp.Sum(this=length))
                 names.append(f"len:{col.name}")
         q = exp.select(*parts).from_(t).group_by(bucket.copy())
         for r in conn.query(conn.render(q)):

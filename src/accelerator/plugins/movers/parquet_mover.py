@@ -84,6 +84,20 @@ def _page_query(
     if conds:
         q = q.where(exp.and_(*conds))
     order = [exp.column(src.quote(key))] if key else cols
+    if not key and offset and src.dialect == "teradata":
+        # Teradata has no OFFSET: number the rows and keep this page's range.
+        rn = exp.Window(this=exp.RowNumber(), order=exp.Order(expressions=[c.copy() for c in cols]))
+        q.set(
+            "qualify",
+            exp.Qualify(
+                this=exp.Between(
+                    this=rn,
+                    low=exp.Literal.number(offset + 1),
+                    high=exp.Literal.number(offset + size),
+                )
+            ),
+        )
+        return src.render(q.order_by(*order))
     q = q.order_by(*order).limit(size)
     if not key and offset:
         q = q.offset(offset)

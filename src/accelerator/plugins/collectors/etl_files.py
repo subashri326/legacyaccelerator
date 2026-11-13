@@ -11,13 +11,28 @@ EXTENSION_MAP: dict[str, tuple[str, str]] = {
     ".dtsx": ("dtsx", "ssis"),
     ".xml": ("informatica_xml", "informatica"),
     ".dsx": ("dsx", "datastage"),
-    ".sql": ("sql", "tsql"),
+    ".sql": ("sql", "tsql"),  # replaced by the source database's own SQL dialect
     ".bteq": ("sql", "bteq"),
+    ".btq": ("sql", "bteq"),
+    ".pls": ("sql", "plsql"),
+    ".pks": ("sql", "plsql"),
+    ".pkb": ("sql", "plsql"),
+    ".prc": ("sql", "plsql"),
+    ".fnc": ("sql", "plsql"),
 }
+SQL_TOOL_BY_DATABASE = {"oracle": "plsql", "teradata": "bteq"}
+
+
+def _xml_tool(head: str, default: tuple[str, str]) -> tuple[str, str]:
+    if "DTS:Executable" in head or "www.microsoft.com/SqlServer/Dts" in head:
+        return "dtsx", "ssis"
+    if "<DSExport" in head:
+        return "dsx", "datastage"
+    return default
 
 
 def collect_etl_artifacts(
-    paths: list[str | Path], default_tool: str = "ssis"
+    paths: list[str | Path], default_tool: str = "ssis", source_database: str = "sqlserver"
 ) -> list[CollectedArtifact]:
     """Walk given files/directories and collect ETL/SQL exports, unpacking .ispac/.isx zips."""
     artifacts: list[CollectedArtifact] = []
@@ -35,22 +50,33 @@ def collect_etl_artifacts(
                         m_ext = Path(member).suffix.lower()
                         if m_ext in (".dtsx", ".xml", ".dsx", ".sql"):
                             art_type, tool = EXTENSION_MAP.get(m_ext, ("xml", default_tool))
+                            data = zf.read(member)
+                            if m_ext == ".xml":  # .isx archives hold DataStage XML jobs
+                                default = (
+                                    ("dsx", "datastage") if ext == ".isx" else (art_type, tool)
+                                )
+                                art_type, tool = _xml_tool(
+                                    data[:500].decode("utf-8", errors="ignore"), default
+                                )
+                            if m_ext == ".sql":
+                                tool = SQL_TOOL_BY_DATABASE.get(source_database, "tsql")
                             artifacts.append(
                                 CollectedArtifact(
                                     artifact_key=f"{file_path.name}!/{member}",
                                     artifact_type=art_type,
                                     source_tool=tool,
-                                    content_bytes=zf.read(member),
+                                    content_bytes=data,
                                     metadata={"archive": str(file_path)},
                                 )
                             )
             elif ext in EXTENSION_MAP:
                 art_type, tool = EXTENSION_MAP[ext]
                 if ext == ".xml":
-                    # Distinguish SSIS XML vs Informatica XML quickly by header
+                    # SSIS, DataStage XML or Informatica XML: tell them apart by the header
                     head = file_path.read_bytes()[:500].decode("utf-8", errors="ignore")
-                    if "DTS:Executable" in head or "www.microsoft.com/SqlServer/Dts" in head:
-                        art_type, tool = "dtsx", "ssis"
+                    art_type, tool = _xml_tool(head, (art_type, tool))
+                if ext == ".sql":
+                    tool = SQL_TOOL_BY_DATABASE.get(source_database, "tsql")
                 artifacts.append(
                     CollectedArtifact(
                         artifact_key=file_path.name,

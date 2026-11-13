@@ -1,0 +1,28 @@
+client: acme_oracle
+project: oracle_sales_dw
+environment: dev
+
+source:
+  database: oracle
+  etl: sql
+  connection: vault://acme/oracle-ro
+  catalog_bundle_path: examples/oracle_sales/oracle_export.sql
+
+target:
+  platform: snowflake
+  output: dbt
+  connection: vault://acme/oracle-target
+
+naming:
+  schema: "{layer}_{source_schema}"
+  table_case: upper
+  column_case: lower
+  layer_default: curated
+
+reconciliation:
+  default_level: L2
+  numeric_tolerance: 0.0
+
+movement:
+  mover: parquet
+  partition_size_rows: 25

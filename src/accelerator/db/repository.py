@@ -188,3 +188,39 @@ def get_active_config(db: Session, project_id: str) -> tuple[ConfigVersion, Clie
     if cfg_row is None:
         raise ValueError(f"No active config version for project '{project_id}'")
     return cfg_row, ClientConfig.model_validate(cfg_row.parsed_json)
+
+
+def table_ir_from_db(db: Session, obj: Any) -> Any:
+    """Rebuild a catalog table (with its column details) from the metadata database."""
+    from accelerator.db.models import DbColumn
+    from accelerator.ir.models import ColumnIR, TableIR
+
+    cols = (
+        db.query(DbColumn)
+        .filter(DbColumn.db_object_id == obj.id)
+        .order_by(DbColumn.ordinal_position)
+        .all()
+    )
+    return TableIR(
+        database=obj.database_name,
+        schema_name=obj.schema_name,
+        name=obj.object_name,
+        row_count=obj.row_count,
+        attributes=dict(obj.attributes or {}),
+        columns=[
+            ColumnIR(
+                name=c.column_name,
+                data_type=c.data_type,
+                length=c.length,
+                precision=c.precision,
+                scale=c.scale,
+                nullable=c.nullable,
+                is_primary_key=c.is_primary_key,
+                is_foreign_key=c.is_foreign_key,
+                fk_target=c.fk_target,
+                ordinal_position=c.ordinal_position,
+                attributes=dict(c.attributes or {}),
+            )
+            for c in cols
+        ],
+    )

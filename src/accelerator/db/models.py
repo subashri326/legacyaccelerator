@@ -167,6 +167,8 @@ class DbObject(Base, AuditMixin):
     is_dead_candidate: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     definition_sql: Mapped[str | None] = mapped_column(Text)
     content_hash: Mapped[str] = mapped_column(String(64), default="", nullable=False)
+    # e.g. {"key_source": "UNIQUE PRIMARY INDEX"}: details that change how a table is handled
+    attributes: Mapped[dict[str, Any]] = mapped_column(JsonType, default=dict, nullable=False)
 
     columns: Mapped[list[DbColumn]] = relationship(
         back_populates="db_object", cascade="all, delete-orphan"
@@ -191,6 +193,8 @@ class DbColumn(Base, AuditMixin):
     is_foreign_key: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     fk_target: Mapped[str | None] = mapped_column(String(400))
     ordinal_position: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # e.g. {"case_insensitive": true, "unicode": true}: behaviour the type alone doesn't say
+    attributes: Mapped[dict[str, Any]] = mapped_column(JsonType, default=dict, nullable=False)
 
     db_object: Mapped[DbObject] = relationship(back_populates="columns")
 

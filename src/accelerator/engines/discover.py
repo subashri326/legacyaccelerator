@@ -130,9 +130,11 @@ class DiscoverEngine:
                             is_foreign_key=col.is_foreign_key,
                             fk_target=col.fk_target,
                             ordinal_position=col.ordinal_position,
+                            attributes=col.attributes,
                             created_by=actor,
                         )
                     )
+                db_obj.attributes = tbl.attributes
                 StateMachine.record_source(db, project_id, tbl.fqn, "table", tbl_hash, actor)
 
             # Upsert views
@@ -194,7 +196,9 @@ class DiscoverEngine:
             if extra_etl_paths:
                 all_etl_paths.extend(extra_etl_paths)
 
-            etl_artifacts = collect_etl_artifacts(all_etl_paths, default_tool=cfg.source.etl)
+            etl_artifacts = collect_etl_artifacts(
+                all_etl_paths, default_tool=cfg.source.etl, source_database=cfg.source.database
+            )
             etl_count = 0
             for item in etl_artifacts:
                 art_row, is_new = self._store_versioned_artifact(

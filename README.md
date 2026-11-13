@@ -34,7 +34,7 @@ l2c serve --port 8000
 l2c ui --port 8501
 ```
 
-## What the ETL readers convert, and what they flag
+## What the readers convert, and what they flag
 
 Each reader converts only what it can reproduce exactly; everything else becomes a review item
 (never a guess). The Acme demo proves the converted jobs return the same rows as the legacy logic
@@ -44,6 +44,8 @@ on all three targets (`tests/test_conversion_correctness.py`, `tests/test_etl_to
 |---|---|---|
 | **SSIS** | sources, derived columns, conditional split (first match), lookups, union, sort, aggregate, destinations | script tasks/components, unknown components |
 | **Informatica PowerCenter** (XML export) | source qualifiers (filter, user join, distinct, SQL override), expressions incl. variable ports, filter, router (every matching group), connected lookups (with source filter), joiner (normal/master/detail/full), aggregator, sorter, union, session overrides, workflow order | Update Strategy, Sequence Generator, mapplets, normalizer, stored procedures, unconnected lookups, `$$` parameters, Command/Decision/Email tasks |
+| **Oracle** (DDL export, views, `.sql`/`.pls` scripts) | tables with types by meaning, keys and foreign keys, views and SQL with Oracle's rules (`''` is NULL, `||` ignores NULLs, `DECODE` matches NULLs, `date + n`, `TRUNC(date)`, `TO_CHAR(date)`, `SUBSTR` from 0, `(+)` joins) | `ROWNUM`, `CONNECT BY`, sequences, `ADD_MONTHS`, date − date, dates compared with text (NLS), numbers/dates joined into text, PL/SQL blocks, SQL*Plus `@`/`EXEC` |
+| **Teradata** (`SHOW` output, views, BTEQ) | tables (MULTISET/SET, `CHARACTER SET`, `FORMAT`, `COMPRESS`, unique primary index as key), views and BTEQ SQL with Teradata's rules (`SEL`/`INS`/`DEL ... ALL`, `QUALIFY`, `ZEROIFNULL`, integer division, `date + n`, `NOT CASESPECIFIC` comparisons), stop-on-error `.IF ERRORCODE` | grouping on `NOT CASESPECIFIC` columns, `SAMPLE`, stored procedures and macros, `.EXPORT`/`.IMPORT`/`.GOTO`/`.OS` |
 | **IBM DataStage** (.dsx or XML export) | DB connector sources/targets, Transformer (constraints, derivations, stage variables, otherwise links), Lookup (continue/drop/fail), Join (inner/left/right), Aggregator, Funnel, Sort, Remove Duplicates, Copy, single-condition Filter, sequence job order | Modify, Merge, Change Capture, SCD, generators, file/data-set stages, containers, update/upsert writes, `#job parameters#`, row-to-row stage variables |
 
 Expression functions are translated one by one with their exact rules (for example,
@@ -75,6 +77,8 @@ SQLAlchemy-style URI:
 | Engine | URI | Install |
 |---|---|---|
 | SQL Server | `mssql+pyodbc://user:pass@host/db?driver=ODBC+Driver+18+for+SQL+Server` | `pip install ".[sqlserver]"` + Microsoft ODBC Driver 18 |
+| Oracle | `oracle+oracledb://user:pass@host:1521/?service_name=ORCLPDB1` | `pip install ".[oracle]"` |
+| Teradata | `teradatasql://user:pass@host` | `pip install ".[teradata]"` |
 | PostgreSQL | `postgresql+psycopg2://user:pass@host/db` | included |
 | Snowflake | `snowflake://user:pass@account/database/schema?warehouse=WH&role=ROLE` | `pip install ".[snowflake]"` |
 | Databricks | `databricks://token:<pat>@<host>?http_path=<warehouse path>&catalog=<c>&schema=<s>` | `pip install ".[databricks]"` |
@@ -90,6 +94,15 @@ can continue with `l2c move <project> --object-key <table> --resume-load-run-id 
 Incremental loads (`--mode incremental`) need `movement.watermark_columns` for the table and a
 single-column primary key. Changed rows replace their old versions by key. Rows deleted at the
 source are not detected.
+
+**Oracle and Teradata:** the offline catalog is read from a DDL export
+(`DBMS_METADATA.GET_DDL` output or Teradata `SHOW TABLE`/`SHOW VIEW`), set as
+`source.catalog_bundle_path`. A Teradata `UNIQUE PRIMARY INDEX` on NOT NULL columns is used as the
+row key; a non-unique primary index is not a key (those tables load in chunks ordered by all
+columns). Column types are mapped by meaning (an Oracle `DATE` holds a time, so it becomes a
+timestamp); mappings that are not exact are raised for review before the table is created.
+Views, BTEQ and PL/SQL scripts are converted with the database's own rules (see the table above for
+what is flagged).
 
 **What is tested where:** the automated tests run the full flow against a real PostgreSQL
 server and against DuckDB. Snowflake, Databricks, Fabric and SQL Server use the same code path

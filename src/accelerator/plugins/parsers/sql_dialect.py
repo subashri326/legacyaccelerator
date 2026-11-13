@@ -21,6 +21,80 @@ from accelerator.ir.models import (
 )
 from accelerator.plugins.interfaces import Parser, PluginManifest
 
+_PROCEDURAL = re.compile(
+    r"\s*(?:(?:CREATE(?:\s+OR\s+REPLACE)?|REPLACE)\s+(?:EDITIONABLE\s+|NONEDITIONABLE\s+)?"
+    r"(?:PROCEDURE|FUNCTION|PACKAGE|TRIGGER|TYPE|MACRO)\b|DECLARE\b|BEGIN\b(?!\s+TRANSACTION))",
+    re.IGNORECASE,
+)
+# BTEQ / SQL*Plus commands that only affect the session or output formatting.
+_HARMLESS_COMMANDS = re.compile(
+    r"^\.?(?:LOGON|LOGOFF|QUIT|EXIT|SET|SESSIONS?|WIDTH|TITLEDASHES|RETLIMIT|ECHOREQ|FOLDLINE|"
+    r"SEPARATOR|DEFAULTS|SHOW|COMPILE|REM(?:ARK)?|PROMPT|SPOOL|COLUMN|TTITLE|BTITLE|"
+    r"WHENEVER\s+SQLERROR\s+EXIT|WHENEVER\s+OSERROR\s+EXIT)\b",
+    re.IGNORECASE,
+)
+_STOP_ON_ERROR = re.compile(
+    r"^\.IF\s+ERRORCODE\s*(?:<>|!=|>|NE|GT)\s*0\s+THEN\s+\.?(?:QUIT|EXIT)\b", re.IGNORECASE
+)
+# Statements with no effect on the target (statistics, transaction brackets, default database).
+_NO_EFFECT = re.compile(
+    r"^\s*(?:COLLECT\s+STAT(?:ISTIC)?S?\b|BT\s*$|ET\s*$|BEGIN\s+TRANSACTION\s*$|"
+    r"END\s+TRANSACTION\s*$|COMMIT(?:\s+WORK)?\s*$|DATABASE\s+\w+\s*$)",
+    re.IGNORECASE,
+)
+
+
+def _prepare_statements(
+    text: str, source_tool: str, dialect: str
+) -> tuple[list[str], list[tuple[str, str, str]]]:
+    """Separate script commands from SQL; split SQL into statements, keeping blocks whole.
+
+    Returns (statements, notices) where notices are (reason_code, detail, snippet) for script
+    commands a person must review.
+    """
+    from accelerator.plugins.collectors.ddl_reader import split_statements
+
+    notices: list[tuple[str, str, str]] = []
+    sql_lines: list[str] = []
+    for line in text.splitlines():
+        s = line.strip()
+        is_bteq_cmd = source_tool == "bteq" and s.startswith(".")
+        is_sqlplus_cmd = source_tool == "plsql" and (
+            s.startswith("@")
+            or (
+                re.match(
+                    r"(?:SET|PROMPT|SPOOL|WHENEVER|REM|REMARK|COLUMN|TTITLE|BTITLE|EXEC|"
+                    r"EXECUTE)\b(?!\s+IMMEDIATE)",
+                    s,
+                    re.IGNORECASE,
+                )
+                and not re.match(r"SET\s+TRANSACTION\b", s, re.IGNORECASE)
+            )
+        )
+        if is_bteq_cmd or is_sqlplus_cmd:
+            if _STOP_ON_ERROR.match(s) or _HARMLESS_COMMANDS.match(s):
+                continue  # stopping on the first error is how converted steps run anyway
+            code = "BTEQ_COMMAND" if is_bteq_cmd else "SQLPLUS_COMMAND"
+            notices.append((code, f"Script command needs review: {s.split()[0]}", s))
+            continue
+        sql_lines.append(line)
+    script = "\n".join(sql_lines)
+    if source_tool == "tsql":
+        script = re.sub(r"(?im)^\s*GO\s*$", ";", script)
+    statements = []
+    for stmt in split_statements(script, dialect if dialect != "tsql" else "tsql"):
+        if _NO_EFFECT.match(stmt):
+            continue
+        if dialect == "teradata":
+            stmt = re.sub(
+                r"^\s*DEL(?:ETE)?\s+FROM\s+(\S+)\s+ALL\s*$",
+                r"DELETE FROM \1",
+                stmt,
+                flags=re.IGNORECASE,
+            )
+        statements.append(stmt)
+    return statements, notices
+
 
 def _parse_sql_to_ir(artifact_name: str, sql_text: str, source_tool: str) -> PackageIR:
     dialect = DIALECT_MAP.get(source_tool.lower(), "tsql")
@@ -30,25 +104,65 @@ def _parse_sql_to_ir(artifact_name: str, sql_text: str, source_tool: str) -> Pac
     task_deps: list[TaskDependencyIR] = []
     opaque_items: list[OpaqueSnippetIR] = []
 
-    # Strip BTEQ dot-commands into orchestration metadata or opaque notices
-    cleaned_lines: list[str] = []
-    bteq_commands: list[str] = []
-    for line in sql_text.splitlines():
-        stripped = line.strip()
-        if source_tool == "bteq" and stripped.startswith("."):
-            bteq_commands.append(stripped)
-            if stripped.upper().startswith((".LOGON", ".LOGOFF", ".QUIT", ".IF ERRORCODE")):
-                continue
-        cleaned_lines.append(line)
-
-    cleaned_sql = "\n".join(cleaned_lines)
-    raw_chunks = [c.strip() for c in cleaned_sql.split(";") if c.strip()]
+    statements, notices = _prepare_statements(sql_text, source_tool, dialect)
+    for n_idx, (code, detail, snippet) in enumerate(notices, start=1):
+        opaque_items.append(
+            OpaqueSnippetIR(
+                node_id=f"script_cmd_{n_idx}",
+                component_name=f"{artifact_name}#command_{n_idx}",
+                component_type="ScriptCommand",
+                reason_code=code,
+                reason_detail=detail,
+                original_snippet=snippet,
+                location=artifact_name,
+            )
+        )
+        tasks.append(
+            OrchestrationTaskIR(
+                id=f"script_cmd_{n_idx}",
+                name=f"Script command {n_idx}",
+                task_type="opaque",
+                sql_statement=snippet,
+                opaque=opaque_items[-1],
+            )
+        )
+    raw_chunks = statements
 
     prev_task_id: str | None = None
     for idx, chunk in enumerate(raw_chunks, start=1):
         task_id = f"sql_step_{idx}"
         # Detect procedural / dynamic constructs that require review
-        if re.search(
+        if _PROCEDURAL.match(chunk):
+            opaque = OpaqueSnippetIR(
+                node_id=task_id,
+                component_name=f"{artifact_name}#step_{idx}",
+                component_type="ProceduralBlock",
+                reason_code="PROCEDURAL_BLOCK",
+                reason_detail="Stored procedure, function, trigger, package or macro: its "
+                "step-by-step logic must be redesigned (for example as models plus orchestration).",
+                original_snippet=chunk,
+                location=artifact_name,
+            )
+            opaque_items.append(opaque)
+            tasks.append(
+                OrchestrationTaskIR(
+                    id=task_id,
+                    name=f"Step {idx} (Procedural)",
+                    task_type="opaque",
+                    sql_statement=chunk,
+                    opaque=opaque,
+                )
+            )
+            flow_nodes.append(
+                NodeIR(
+                    id=task_id,
+                    name=f"Procedural Step {idx}",
+                    operator=NodeOperator.OPAQUE,
+                    source_component_type="ProceduralSQL",
+                    opaque=opaque,
+                )
+            )
+        elif re.search(
             r"\b(?:EXEC|EXECUTE\s+IMMEDIATE|sp_executesql|CURSOR|WHILE|GOTO)\b",
             chunk,
             re.IGNORECASE,
@@ -153,7 +267,8 @@ def _parse_sql_to_ir(artifact_name: str, sql_text: str, source_tool: str) -> Pac
                         id=task_id,
                         name=f"Execute SQL Step {idx}",
                         task_type="execute_sql",
-                        sql_statement=parsed.sql(dialect="postgres"),
+                        # kept in the source dialect: conversion needs its exact meaning
+                        sql_statement=parsed.sql(dialect=dialect),
                     )
                 )
             except (SqlglotError, ValueError) as exc:
@@ -191,20 +306,6 @@ def _parse_sql_to_ir(artifact_name: str, sql_text: str, source_tool: str) -> Pac
                 TaskDependencyIR(upstream_task_id=prev_task_id, downstream_task_id=task_id)
             )
         prev_task_id = task_id
-
-    for b_idx, cmd in enumerate(bteq_commands, start=1):
-        if ".IF ERRORCODE" in cmd.upper():
-            opaque_items.append(
-                OpaqueSnippetIR(
-                    node_id=f"bteq_ctrl_{b_idx}",
-                    component_name=f"BTEQControl#{b_idx}",
-                    component_type="BTEQControlFlow",
-                    reason_code="BTEQ_CONTROL_FLOW",
-                    reason_detail="BTEQ conditional error handling mapped to orchestration review.",
-                    original_snippet=cmd,
-                    location=artifact_name,
-                )
-            )
 
     df = DataFlowGraphIR(
         id=f"{artifact_name}_df",

@@ -40,6 +40,8 @@ class GeneratedFile:
     object_key: str
     compile_passed: bool = True
     compile_log: str = "Syntax check passed"
+    # Mapping decisions a person must confirm (e.g. a type with no exact target equivalent).
+    review_notes: list[GeneratedResidue] = field(default_factory=list)
 
 
 @dataclass

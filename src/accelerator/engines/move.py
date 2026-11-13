@@ -11,16 +11,15 @@ from accelerator.core.observability import metrics
 from accelerator.core.storage import ArtifactStore, get_artifact_store
 from accelerator.db.base import utcnow
 from accelerator.db.models import (
-    DbColumn,
     DbObject,
     GeneratedArtifact,
     LoadPartition,
     LoadRun,
+    ObjectStatus,
     WaveMember,
 )
-from accelerator.db.repository import get_active_config, record_audit
-from accelerator.engines.state_machine import ObjectState, StateMachine
-from accelerator.ir.models import ColumnIR, TableIR
+from accelerator.db.repository import get_active_config, record_audit, table_ir_from_db
+from accelerator.engines.state_machine import STATE_ORDER, ObjectState, StateMachine
 from accelerator.plugins.interfaces import PartitionResult
 from accelerator.plugins.registry import PluginRegistry, get_plugin_registry
 
@@ -32,6 +31,8 @@ class MoveSummary:
     total_rows_loaded: int
     load_run_ids: list[str]
     failed_tables: list[str] = field(default_factory=list)
+    # Tables not moved because their conversion is not finished (open review items).
+    held_tables: list[str] = field(default_factory=list)
 
 
 class MoveEngine:
@@ -79,29 +80,23 @@ class MoveEngine:
             failed: list[str] = []
             run_ids: list[str] = []
 
+            held: list[str] = []
             for obj in tables:
-                cols = (
-                    db.query(DbColumn)
-                    .filter(DbColumn.db_object_id == obj.id)
-                    .order_by(DbColumn.ordinal_position)
-                    .all()
+                status = (
+                    db.query(ObjectStatus)
+                    .filter(
+                        ObjectStatus.project_id == project_id, ObjectStatus.object_key == obj.fqn
+                    )
+                    .first()
                 )
-                tbl_ir = TableIR(
-                    database=obj.database_name,
-                    schema_name=obj.schema_name,
-                    name=obj.object_name,
-                    columns=[
-                        ColumnIR(
-                            name=c.column_name,
-                            data_type=c.data_type,
-                            nullable=c.nullable,
-                            is_primary_key=c.is_primary_key,
-                            ordinal_position=c.ordinal_position,
-                        )
-                        for c in cols
-                    ],
-                    row_count=obj.row_count,
-                )
+                if (
+                    status is not None
+                    and STATE_ORDER.get(ObjectState(status.state), 0)
+                    < STATE_ORDER[ObjectState.CONVERTED]
+                ):
+                    held.append(obj.fqn)  # e.g. a type mapping still awaiting approval
+                    continue
+                tbl_ir = table_ir_from_db(db, obj)
 
                 ddl_art = (
                     db.query(GeneratedArtifact)
@@ -285,4 +280,5 @@ class MoveEngine:
                 total_rows_loaded=total_rows,
                 load_run_ids=run_ids,
                 failed_tables=failed,
+                held_tables=held,
             )
