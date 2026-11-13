@@ -40,18 +40,6 @@ services:
       - postgres
       - minio
 
-  streamlit:
-    build:
-      context: ..
-      dockerfile: deploy/Dockerfile.backend
-    command: ["streamlit", "run", "src/accelerator/ui/streamlit_app.py", "--server.address=0.0.0.0", "--server.port=8501"]
-    environment:
-      L2C_DATABASE_URL: postgresql+psycopg2://l2c:l2c_dev_password@postgres:5432/l2c_metadata
-    ports:
-      - "8501:8501"
-    depends_on:
-      - postgres
-
   frontend:
     build:
       context: ../frontend

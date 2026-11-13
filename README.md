@@ -4,13 +4,40 @@ A platform-neutral, metadata-driven data modernization product that takes legacy
 
 ## Architecture Overview
 
-- **Experience Layer**: FastAPI REST API (`accelerator.api`), Typer CLI (`l2c`), Python-native Streamlit Web UI (`accelerator.ui.streamlit_app`), and React + TypeScript SPA (`frontend/`).
+- **Experience Layer**: a React web app (`frontend/`) in the style of Airbyte — Sources, Destinations, a New-migration wizard and a live step-by-step view of each run — served by the FastAPI REST API (`accelerator.api`), plus the Typer CLI (`l2c`).
 - **Control Plane**: Client YAML configuration versioning, restartable/idempotent `RunOrchestrator`, 8-state evidence-backed `StateMachine` (`Discovered -> Assessed -> Converted -> Reviewed -> Deployed -> Loaded -> Validated -> SignedOff`), RBAC, and immutable `AuditLog`.
 - **Six Stage Engines**: `DiscoverEngine`, `AssessEngine`, `ConvertEngine`, `MoveEngine`, `ReconcileEngine`, `TrackEngine`.
 - **Plugin SDK (5 Interfaces)**: `SourceCollector`, `Parser`, `TargetGenerator` (including vendor wrappers for Lakebridge, SnowConvert AI, Fabric Migration Assistant), `Mover` (Parquet bulk/incremental + Airbyte), `Validator` (pushed-down L1–L4 + job-level).
 - **Foundations**: 10-group Metadata DB (PostgreSQL DDL in `sql/postgres_ddl.sql` + SQLAlchemy/Alembic + local SQLite fallback), S3/ADLS/Local `ArtifactStore`, HashiCorp/Env/Local `SecretsVault`, Git wave PR delivery, Prometheus `/metrics`.
 
-## Quickstart (Local Virtualenv + Acme Retail Demo)
+## Quickstart: the web app
+
+```powershell
+# 1. Build the web app once (needs Node.js 20+)
+cd frontend; npm ci; npm run build; cd ..
+
+# 2. Activate the virtualenv, set up the metadata database, start the server
+.venv\Scripts\Activate.ps1
+l2c init
+l2c serve --port 8000
+```
+
+Open http://localhost:8000 and sign in (in dev: `admin` / `admin123!`). Then:
+
+1. **Settings** → add a client.
+2. **Sources** → New source → pick Oracle, SQL Server, Teradata… → fill in the form → **Test connection** → Set up.
+3. **Destinations** → the same for Snowflake, Databricks or Fabric.
+4. **Migrations** → New migration → choose the source and destination, the schemas (or a DDL export) and any
+   job exports → **Create and start**. The migration page shows each step as it runs: read the old system,
+   estimate effort, write new code, copy the data, check the numbers.
+
+To try it without any servers, run `python examples\acme_retail\seed_legacy_db.py` and use the
+"DuckDB file (local test)" connector with `.l2c_data/demo_acme/legacy_acme.duckdb` as the source and
+`.l2c_data/demo_acme/target_cloud.duckdb` as the destination.
+
+While changing the frontend, run `npm run dev` in `frontend/` (http://localhost:5173, API calls go to port 8000).
+
+## Quickstart: the command line (Acme Retail demo)
 
 ```powershell
 # 1. Activate virtualenv
@@ -29,9 +56,8 @@ l2c register examples\acme_retail\client_config.yaml
 l2c run-pipeline <PROJECT_ID> --deliver-git
 l2c track <PROJECT_ID>
 
-# 5. Launch REST API or Streamlit Web UI
+# 5. Open the web app and API on http://localhost:8000
 l2c serve --port 8000
-l2c ui --port 8501
 ```
 
 ## What the readers convert, and what they flag
@@ -55,7 +81,7 @@ target cannot run exactly (e.g. `LPAD` on Fabric) is flagged for that target onl
 ## Docker Compose & Kubernetes Helm
 
 ```bash
-# Full stack (PostgreSQL, MinIO, FastAPI, Streamlit, React Nginx UI, Prometheus)
+# Full stack (PostgreSQL, MinIO, FastAPI, the React app behind Nginx on :3000, Prometheus)
 docker compose -f deploy/docker-compose.yml up --build
 
 # Client-hosted Kubernetes via Helm
