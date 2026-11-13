@@ -158,6 +158,13 @@ class Connector(ABC):
             f"CREATE TABLE {self.qualified(schema, name)} AS SELECT * FROM {src} WHERE 1 = 0"
         )
 
+    def list_schemas(self) -> list[str]:
+        """Schemas visible to this login (used to show what a connection can see)."""
+        return []
+
+    def list_tables(self, schema: str) -> list[str]:
+        return []
+
     def close(self) -> None:  # noqa: B027 - optional hook
         pass
 
@@ -172,6 +179,20 @@ class Connector(ABC):
 class DuckDBConnector(Connector):
     kind = "duckdb"
     dialect = "duckdb"
+
+    def list_schemas(self) -> list[str]:
+        rows = self.query(
+            "SELECT DISTINCT schema_name FROM information_schema.schemata "
+            "WHERE schema_name NOT IN ('information_schema', 'pg_catalog') ORDER BY 1"
+        )
+        return [r[0] for r in rows]
+
+    def list_tables(self, schema: str) -> list[str]:
+        rows = self.query(
+            "SELECT table_name FROM information_schema.tables WHERE table_schema = ? ORDER BY 1",
+            [schema],
+        )
+        return [r[0] for r in rows]
 
     def transpile(self, sql: str, read: str) -> list[str]:
         # DuckDB text and binary types have no length limit: VARCHAR(MAX) is just VARCHAR.
@@ -234,6 +255,25 @@ class SqlAlchemyConnector(Connector):
     """Any engine with a SQLAlchemy dialect. Rows are written with batched INSERTs."""
 
     kind = "sqlalchemy"
+    _SYSTEM_SCHEMAS = frozenset({
+        "information_schema", "pg_catalog", "pg_toast", "sys", "guest", "db_owner",
+        "db_accessadmin", "db_securityadmin", "db_ddladmin", "db_backupoperator",
+        "db_datareader", "db_datawriter", "db_denydatareader", "db_denydatawriter",
+        "dbc", "syslib", "sysudtlib", "td_sysfnlib", "system", "xdb", "outln", "ctxsys",
+        "mdsys", "ordsys", "dvsys", "lbacsys", "gsmadmin_internal", "appqossys", "dbsfwuser",
+        "audsys", "ojvmsys", "olapsys", "wmsys", "ords_metadata",
+    })  # fmt: skip
+
+    def list_schemas(self) -> list[str]:
+        from sqlalchemy import inspect
+
+        names = inspect(self.engine).get_schema_names()
+        return [n for n in names if n.lower() not in self._SYSTEM_SCHEMAS]
+
+    def list_tables(self, schema: str) -> list[str]:
+        from sqlalchemy import inspect
+
+        return list(inspect(self.engine).get_table_names(schema=schema))
 
     def __init__(self, url: str) -> None:
         from sqlalchemy import create_engine

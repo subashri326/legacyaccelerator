@@ -82,14 +82,24 @@ class Environment(Base, AuditMixin):
 
 
 class Connection(Base, AuditMixin):
+    """A source or target system.
+
+    Saved connections belong to a client (``client_id`` set, ``project_id`` empty) and are
+    reused by its migrations; a project's own copy names the connection its config uses.
+    """
+
     __tablename__ = "connection"
     __table_args__ = (
         UniqueConstraint("project_id", "environment_id", "name", name="uq_conn_project_env_name"),
+        UniqueConstraint("client_id", "name", name="uq_conn_client_name"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
-    project_id: Mapped[str] = mapped_column(
-        ForeignKey("project.id", ondelete="CASCADE"), nullable=False
+    project_id: Mapped[str | None] = mapped_column(
+        ForeignKey("project.id", ondelete="CASCADE"), nullable=True
+    )
+    client_id: Mapped[str | None] = mapped_column(
+        ForeignKey("client.id", ondelete="CASCADE"), nullable=True
     )
     environment_id: Mapped[str | None] = mapped_column(
         ForeignKey("environment.id", ondelete="SET NULL")
@@ -99,6 +109,10 @@ class Connection(Base, AuditMixin):
     platform: Mapped[str] = mapped_column(String(50), nullable=False)
     secret_ref: Mapped[str] = mapped_column(String(255), nullable=False)  # vault:// or env://
     properties: Mapped[dict[str, Any]] = mapped_column(JsonType, default=dict, nullable=False)
+    # Result of the last "Test connection": passed | failed (empty = never tested).
+    last_test_status: Mapped[str | None] = mapped_column(String(20))
+    last_test_message: Mapped[str | None] = mapped_column(Text)
+    last_tested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class ConfigVersion(Base, AuditMixin):
@@ -662,6 +676,26 @@ class ReconResult(Base, AuditMixin):
 # ---------------------------------------------------------------------------
 # 9. Tracking: object_status, status_event, signoff
 # ---------------------------------------------------------------------------
+
+
+class PipelineRun(Base, AuditMixin):
+    """One click of Run: the stages run in the background and report progress here."""
+
+    __tablename__ = "pipeline_run"
+    __table_args__ = (Index("ix_pipeline_run_project", "project_id", "created_at"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("project.id", ondelete="CASCADE"), nullable=False
+    )
+    status: Mapped[str] = mapped_column(String(20), default="queued", nullable=False)
+    # queued | running | succeeded | failed | interrupted
+    current_stage: Mapped[str | None] = mapped_column(String(30))
+    # [{"name", "status", "started_at", "finished_at", "summary", "error"}]
+    stages: Mapped[list[dict[str, Any]]] = mapped_column(JsonType, default=list, nullable=False)
+    error: Mapped[str | None] = mapped_column(Text)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class ObjectStatus(Base, AuditMixin):

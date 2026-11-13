@@ -14,7 +14,22 @@ from pathlib import Path, PurePosixPath
 from accelerator.config.settings import get_settings
 from accelerator.core.exceptions import UnsafePathError
 
-ALLOWED_UPLOAD_EXTENSIONS = {".dtsx", ".ispac", ".xml", ".dsx", ".isx", ".sql", ".bteq"}
+ALLOWED_UPLOAD_EXTENSIONS = {
+    ".dtsx",
+    ".ispac",
+    ".xml",
+    ".dsx",
+    ".isx",
+    ".sql",
+    ".ddl",
+    ".bteq",
+    ".btq",
+    ".pls",
+    ".pks",
+    ".pkb",
+    ".prc",
+    ".fnc",
+}
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._ -]{0,199}$")
 

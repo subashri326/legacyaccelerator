@@ -9,7 +9,17 @@ from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from accelerator.api.routers import auth, objects, plugins, projects, review, stages, track
+from accelerator.api.routers import (
+    auth,
+    connections,
+    migrations,
+    objects,
+    plugins,
+    projects,
+    review,
+    stages,
+    track,
+)
 from accelerator.config.settings import Settings, get_settings
 from accelerator.core.exceptions import (
     AuthenticationError,
@@ -24,6 +34,7 @@ from accelerator.core.exceptions import (
 from accelerator.core.observability import configure_logging, metrics
 from accelerator.db.session import init_db, session_scope
 from accelerator.engines.reconcile import purge_expired_samples
+from accelerator.orchestration.live_runs import mark_interrupted_runs
 from accelerator.plugins.registry import get_plugin_registry
 
 
@@ -34,6 +45,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     with session_scope() as db:
         purge_expired_samples(db)
         get_plugin_registry().sync_to_db(db)
+    mark_interrupted_runs()
     yield
 
 
@@ -128,6 +140,8 @@ def create_app() -> FastAPI:
     app.include_router(review.router)
     app.include_router(track.router)
     app.include_router(plugins.router)
+    app.include_router(connections.router)
+    app.include_router(migrations.router)
     return app
 
 

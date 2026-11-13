@@ -18,6 +18,7 @@ How a table is moved:
 from __future__ import annotations
 
 import hashlib
+import re
 from collections.abc import Callable
 from typing import Any
 
@@ -115,8 +116,15 @@ def _ensure_target_table(tgt: Connector, tt: TableIR, ddl_sql: str | None, platf
             "target table is created with the converted names and types."
         )
     platform_dialect = DIALECT_MAP.get(platform, platform)
+    # Schemas are created by create_schema (syntax differs per engine); drop those lines first
+    # so an engine-specific form (e.g. T-SQL IF ... EXEC) can't swallow the CREATE TABLE.
+    ddl_sql = "\n".join(
+        line
+        for line in ddl_sql.splitlines()
+        if not re.search(r"\bCREATE\s+SCHEMA\b", line, re.IGNORECASE)
+    )
     for stmt in tgt.transpile(ddl_sql, read=platform_dialect):
-        if stmt.lstrip().upper().startswith("CREATE SCHEMA"):
+        if re.search(r"\bCREATE\s+SCHEMA\b", stmt, re.IGNORECASE):
             continue  # handled by create_schema (syntax differs per engine)
         tgt.execute(stmt)
     return True
