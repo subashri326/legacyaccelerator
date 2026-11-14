@@ -165,6 +165,7 @@ def test_databricks_writes_many_rows_per_statement(monkeypatch: pytest.MonkeyPat
     conn = connectors.DatabricksConnector.__new__(connectors.DatabricksConnector)
     conn.dialect = "databricks"
     conn.engine = type("E", (), {"connect": lambda self: Ctx()})()
+    monkeypatch.setattr(connectors, "DATABRICKS_ROWS_PER_STATEMENT", 500)
     n = 1_234
     table = pa.table({"id": list(range(n)), "note": [f"row {i}" for i in range(n)]})
     assert conn.write_arrow(table, "curated_dbo", "orders") == n

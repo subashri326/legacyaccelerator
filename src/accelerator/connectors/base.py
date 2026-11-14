@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import os
 import re
 from abc import ABC, abstractmethod
 from collections.abc import Iterator, Sequence
@@ -18,7 +19,10 @@ from accelerator.core.secrets import resolve_connection_uri
 # How many rows go into one INSERT round trip on engines without a native bulk path.
 INSERT_CHUNK_ROWS = 1000
 # Databricks runs one statement per parameter set, so rows go in as multi-row literal INSERTs.
-DATABRICKS_ROWS_PER_STATEMENT = 500
+# Each statement costs a round trip of a second or two on a small serverless warehouse, so the
+# blocks are large (5,000 rows of a typical table is well under 1 MB of SQL text).
+# L2C_DATABRICKS_ROWS_PER_STATEMENT overrides it.
+DATABRICKS_ROWS_PER_STATEMENT = int(os.environ.get("L2C_DATABRICKS_ROWS_PER_STATEMENT", "5000"))
 # Snowflake refuses a key file in the URL; the accelerator carries it in this parameter instead.
 SNOWFLAKE_KEY_PARAM = "l2c_private_key_file"
 
