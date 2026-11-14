@@ -140,12 +140,53 @@ def _close(a: float | None, b: float | None, tol: float) -> tuple[bool, float]:
     return delta <= tol + 1e-9 * max(1.0, abs(a), abs(b)), delta
 
 
+# Snowflake's Python connector (5.x) fails converting date/time values on Windows ("Python int
+# too large to convert to C int"). For checks, Snowflake returns them as fixed-format text.
+_SNOWFLAKE_TEXT_FORMATS = {
+    "DATE": "YYYY-MM-DD",
+    "TIME": "HH24:MI:SS.FF6",
+    "TIMESTAMP_NTZ": "YYYY-MM-DD HH24:MI:SS.FF6",
+    "TIMESTAMP_LTZ": "YYYY-MM-DD HH24:MI:SS.FF6",
+    "TIMESTAMP_TZ": "YYYY-MM-DD HH24:MI:SS.FF6",
+}
+
+
+def _snowflake_types(conn: Connector, tbl: TableIR) -> dict[str, str]:
+    """Column name (upper case) -> Snowflake data type, from the information schema."""
+    rows = conn.query(
+        "SELECT column_name, data_type FROM information_schema.columns "
+        "WHERE table_schema = ? AND table_name = ?",
+        [tbl.schema_name.upper(), tbl.name.upper()],
+    )
+    return {str(n).upper(): str(t).upper() for n, t in rows}
+
+
+def _from_text(v: Any) -> Any:
+    """Turn the fixed-format text back into a date, time or timestamp."""
+    if not isinstance(v, str):
+        return v
+    try:
+        if len(v) == 10:
+            return date.fromisoformat(v)
+        if len(v) <= 15 and v[2] == ":":
+            return time.fromisoformat(v)
+        return datetime.fromisoformat(v)
+    except ValueError:
+        return v
+
+
 def _profile(
     conn: Connector, tbl: TableIR, kinds: list[str], level: str, key: str | None
 ) -> dict[str, Any]:
     t = exp.to_table(conn.qualified(tbl.schema_name, tbl.name), dialect=conn.dialect)
     sel: list[exp.Expression] = [exp.Count(this=exp.Star())]
     layout: list[tuple[str, str]] = []
+    sf_types = (
+        _snowflake_types(conn, tbl)
+        if conn.dialect == "snowflake" and any(k in ("other", "tstz") for k in kinds)
+        else {}
+    )
+    as_text: set[str] = set()
     for col, kind in zip(tbl.columns, kinds, strict=True):
         c = exp.column(conn.quote(col.name))
         nulls = exp.Sum(
@@ -175,16 +216,25 @@ def _profile(
             layout += [(col.name, "null_count")]
         else:
             v = _utc(conn, c.copy()) if kind == "tstz" else c
-            sel += [
-                exp.Min(this=v.copy()),
-                exp.Max(this=v.copy()),
-                nulls,
-                exp.Count(this=exp.Distinct(expressions=[v.copy()])),
-            ]
+            lo: exp.Expression = exp.Min(this=v.copy())
+            hi: exp.Expression = exp.Max(this=v.copy())
+            sf_type = sf_types.get(col.name.upper(), "")
+            if kind == "tstz" and sf_type:
+                sf_type = "TIMESTAMP_NTZ"  # _utc already made it a plain UTC timestamp
+            fmt = _SNOWFLAKE_TEXT_FORMATS.get(sf_type)
+            if fmt:
+                lo, hi = (
+                    exp.Anonymous(this="TO_VARCHAR", expressions=[e, exp.Literal.string(fmt)])
+                    for e in (lo, hi)
+                )
+                as_text.add(col.name)
+            sel += [lo, hi, nulls, exp.Count(this=exp.Distinct(expressions=[v.copy()]))]
             layout += [(col.name, s) for s in ("min", "max", "null_count", "distinct_count")]
     row = conn.query(conn.render(exp.select(*sel).from_(t)))[0]
     prof: dict[str, Any] = {"row_count": int(row[0]), "columns": {}, "buckets": {}}
     for (cname, stat), val in zip(layout, row[1:], strict=True):
+        if cname in as_text and stat in ("min", "max"):
+            val = _from_text(val)
         prof["columns"].setdefault(cname, {})[stat] = _norm(val)
 
     if level in ("L3", "L4") and key:
