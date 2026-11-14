@@ -287,6 +287,7 @@ def test_snowflake_load_is_committed(monkeypatch: pytest.MonkeyPatch) -> None:
 
     def fake_write_pandas(raw: Any, df: Any, **kw: Any) -> tuple[bool, int, int, Any]:
         calls.append(f"write {kw['schema']}.{kw['table_name']}")
+        assert kw["use_logical_type"] is True  # else timestamps load in the wrong unit
         return True, 1, len(df), None
 
     mod = types.ModuleType("snowflake.connector.pandas_tools")
