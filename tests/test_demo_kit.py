@@ -324,6 +324,8 @@ def test_time_zone_columns_are_compared_as_utc_instants() -> None:
     assert _kind("TIMESTAMP(6) WITH TIME ZONE") == "tstz"
     assert _kind("TIMESTAMP_TZ(6)") == "tstz"
     assert _kind("TIMESTAMP_NTZ(0)") == "other"
+    assert _kind("TIMESTAMP WITHOUT TIME ZONE") == "other"  # how PostgreSQL names plain ones
+    assert _kind("TIMESTAMP(6) WITH LOCAL TIME ZONE") == "tstz"
 
     class Conn:
         def __init__(self, d: str) -> None:

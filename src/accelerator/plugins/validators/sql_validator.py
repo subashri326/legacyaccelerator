@@ -86,6 +86,7 @@ _UTC_SQL = {
     "snowflake": "CAST(CONVERT_TIMEZONE('UTC', {c}) AS TIMESTAMP_NTZ)",
     "tsql": "CAST(SWITCHOFFSET({c}, '+00:00') AS DATETIME2)",
     "postgres": "({c} AT TIME ZONE 'UTC')",
+    "duckdb": "({c} AT TIME ZONE 'UTC')",
 }
 
 
@@ -98,7 +99,8 @@ def _utc(conn: Connector, c: exp.Expression) -> exp.Expression:
 
 def _kind(dtype: str) -> str:
     b = _base(dtype)
-    if "TIME ZONE" in dtype.upper() or b in _TZ_TYPES:
+    up = dtype.upper()
+    if ("TIME ZONE" in up and "WITHOUT TIME ZONE" not in up) or b in _TZ_TYPES:
         return "tstz"
     if b in BOOL_TYPES:
         return "bool"
