@@ -413,3 +413,33 @@ def test_snowflake_dates_and_times_are_checked_as_text() -> None:
     assert cols["updated_ts"]["max"] == "2026-05-28 12:40:00"
     assert cols["ship_day"]["min"] == "2025-06-02"
     assert cols["order_id"]["max"] == 2.0
+
+
+def test_snowflake_row_samples_read_dates_as_text() -> None:
+    from accelerator.connectors.base import DuckDBConnector
+    from accelerator.ir.models import ColumnIR, TableIR
+    from accelerator.plugins.validators.sql_validator import _sample
+
+    sent: list[str] = []
+
+    class FakeSnowflake(DuckDBConnector):
+        def query(self, sql: str, params: Any = None) -> list[tuple[Any, ...]]:
+            sent.append(sql)
+            if "information_schema" in sql:
+                return [("ORDER_ID", "NUMBER"), ("UPDATED_TS", "TIMESTAMP_TZ")]
+            return [(1, "2025-06-01 10:13:00.000000")]
+
+    conn = FakeSnowflake(":memory:")
+    conn.dialect = "snowflake"
+    tbl = TableIR(
+        database="L2C_DEMO",
+        schema_name="curated_sales",
+        name="orders",
+        columns=[
+            ColumnIR(name="order_id", data_type="NUMBER(12, 0)", ordinal_position=1),
+            ColumnIR(name="updated_ts", data_type="TIMESTAMP_TZ(6)", ordinal_position=2),
+        ],
+    )
+    rows = _sample(conn, tbl, 0, [], 10)
+    assert "TO_VARCHAR(CAST(CONVERT_TIMEZONE('UTC', updated_ts)" in sent[-1]
+    assert rows == [(1, dt.datetime(2025, 6, 1, 10, 13))]

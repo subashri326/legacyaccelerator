@@ -271,7 +271,21 @@ def _sample(
     t = exp.to_table(conn.qualified(tbl.schema_name, tbl.name), dialect=conn.dialect)
     cols = [exp.column(conn.quote(c.name)) for c in tbl.columns]
     kc = cols[key_pos].copy()
-    q = exp.select(*cols).from_(t)
+    text_pos: list[int] = []
+    shown: list[exp.Expression] = list(cols)
+    if conn.dialect == "snowflake":  # see _SNOWFLAKE_TEXT_FORMATS
+        sf_types = _snowflake_types(conn, tbl)
+        for i, col in enumerate(tbl.columns):
+            fmt = _SNOWFLAKE_TEXT_FORMATS.get(sf_types.get(col.name.upper(), ""))
+            if fmt:
+                c = cols[i].copy()
+                if sf_types[col.name.upper()] in ("TIMESTAMP_TZ", "TIMESTAMP_LTZ"):
+                    c = _utc(conn, c)
+                shown[i] = exp.Anonymous(
+                    this="TO_VARCHAR", expressions=[c, exp.Literal.string(fmt)]
+                )
+                text_pos.append(i)
+    q = exp.select(*shown).from_(t)
     if buckets:
         q = q.where(
             exp.In(
@@ -280,7 +294,10 @@ def _sample(
             )
         )
     q = q.order_by(kc).limit(limit)
-    return conn.query(conn.render(q))
+    rows = conn.query(conn.render(q))
+    if not text_pos:
+        return rows
+    return [tuple(_from_text(v) if i in text_pos else v for i, v in enumerate(r)) for r in rows]
 
 
 class SqlPushdownValidator(Validator):
@@ -413,47 +430,63 @@ class SqlPushdownValidator(Validator):
                     }
 
             if key_pos is not None and (level == "L4" or failed):
-                limit = config.reconciliation.l4_sample_limit
-                masked = sorted(
-                    set(config.reconciliation.masked_columns) | set(rule.masked_columns)
-                )
-                names = [c.name for c in table.columns]
-                s_rows = {
-                    _norm(r[key_pos]): dict(zip(names, map(_norm, r), strict=True))
-                    for r in _sample(src, table, key_pos, bad_buckets, limit * 5)
-                }
-                t_rows = {
-                    _norm(r[key_pos]): dict(zip(names, map(_norm, r), strict=True))
-                    for r in _sample(tgt, tt, key_pos, bad_buckets, limit * 5)
-                }
-                mism = [
-                    {
-                        "key": k,
-                        "source": mask_row_sample(s_rows[k], masked),
-                        "target": mask_row_sample(t_rows[k], masked),
-                    }
-                    for k in sorted(s_rows.keys() & t_rows.keys(), key=str)
-                    if s_rows[k] != t_rows[k]
-                ][:limit]
-                diffs["l4_diff"] = {
-                    "only_in_source_count": len(s_rows.keys() - t_rows.keys()),
-                    "only_in_target_count": len(t_rows.keys() - s_rows.keys()),
-                    "value_mismatch_count": len(mism),
-                    "only_in_source_sample": [
-                        mask_row_sample(s_rows[k], masked)
-                        for k in sorted(s_rows.keys() - t_rows.keys(), key=str)[:limit]
-                    ],
-                    "only_in_target_sample": [
-                        mask_row_sample(t_rows[k], masked)
-                        for k in sorted(t_rows.keys() - s_rows.keys(), key=str)[:limit]
-                    ],
-                    "value_mismatch_sample": mism,
-                    "masked_columns": masked,
-                    "sampled_buckets": bad_buckets or "first rows by key",
-                }
+                try:
+                    self._row_sample(config, rule, src, tgt, table, tt, key_pos, bad_buckets, diffs)
+                except Exception as exc:  # keep the column differences already found
+                    diffs["l4_diff_error"] = f"{type(exc).__name__}: {str(exc).splitlines()[0]}"
 
         verdict = "fail" if failed else ("pass_within_tolerance" if within else "pass")
         return ValidationOutcome(table.fqn, level, verdict, s, t, diffs)
+
+    def _row_sample(
+        self,
+        config: Any,
+        rule: Any,
+        src: Connector,
+        tgt: Connector,
+        table: TableIR,
+        tt: TableIR,
+        key_pos: int,
+        bad_buckets: list[str],
+        diffs: dict[str, Any],
+    ) -> None:
+        """Compare actual rows (a sample) to show which ones differ."""
+        limit = config.reconciliation.l4_sample_limit
+        masked = sorted(set(config.reconciliation.masked_columns) | set(rule.masked_columns))
+        names = [c.name for c in table.columns]
+        s_rows = {
+            _norm(r[key_pos]): dict(zip(names, map(_norm, r), strict=True))
+            for r in _sample(src, table, key_pos, bad_buckets, limit * 5)
+        }
+        t_rows = {
+            _norm(r[key_pos]): dict(zip(names, map(_norm, r), strict=True))
+            for r in _sample(tgt, tt, key_pos, bad_buckets, limit * 5)
+        }
+        mism = [
+            {
+                "key": k,
+                "source": mask_row_sample(s_rows[k], masked),
+                "target": mask_row_sample(t_rows[k], masked),
+            }
+            for k in sorted(s_rows.keys() & t_rows.keys(), key=str)
+            if s_rows[k] != t_rows[k]
+        ][:limit]
+        diffs["l4_diff"] = {
+            "only_in_source_count": len(s_rows.keys() - t_rows.keys()),
+            "only_in_target_count": len(t_rows.keys() - s_rows.keys()),
+            "value_mismatch_count": len(mism),
+            "only_in_source_sample": [
+                mask_row_sample(s_rows[k], masked)
+                for k in sorted(s_rows.keys() - t_rows.keys(), key=str)[:limit]
+            ],
+            "only_in_target_sample": [
+                mask_row_sample(t_rows[k], masked)
+                for k in sorted(t_rows.keys() - s_rows.keys(), key=str)[:limit]
+            ],
+            "value_mismatch_sample": mism,
+            "masked_columns": masked,
+            "sampled_buckets": bad_buckets or "first rows by key",
+        }
 
     def reconcile_job(
         self,
