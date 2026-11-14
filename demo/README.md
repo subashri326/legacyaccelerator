@@ -182,8 +182,8 @@ list `sales` (Oracle) or `dbo` and `finance` (SQL Server).
 
    Use your catalog name instead of `workspace` in a trial.
 
-Copying to Databricks takes a minute or two. Rows go in as batched INSERTs through the SQL
-warehouse, which is fine at demo sizes. For large tables in a real project, the faster route is
+Copying to Databricks takes a minute or two: rows go in as INSERTs of 5,000 rows each through
+the SQL warehouse, which is fine at demo sizes. For large tables in a real project, the faster route is
 cloud storage plus `COPY INTO`.
 
 ---
