@@ -37,6 +37,12 @@ To try it without any servers, run `python examples\acme_retail\seed_legacy_db.p
 
 While changing the frontend, run `npm run dev` in `frontend/` (http://localhost:5173, API calls go to port 8000).
 
+## Live demo: Oracle and SQL Server to Snowflake and Databricks
+
+`demo/` runs a real Oracle and a real SQL Server in Docker, loads sample data and walks through
+moving them to Snowflake and Databricks trial accounts in the web app. See
+[demo/README.md](demo/README.md).
+
 ## Quickstart: the command line (Acme Retail demo)
 
 ```powershell
@@ -102,7 +108,7 @@ SQLAlchemy-style URI:
 
 | Engine | URI | Install |
 |---|---|---|
-| SQL Server | `mssql+pyodbc://user:pass@host/db?driver=ODBC+Driver+18+for+SQL+Server` | `pip install ".[sqlserver]"` + Microsoft ODBC Driver 18 |
+| SQL Server | `mssql+pymssql://user:pass@host:1433/db` (nothing else to install) or `mssql+pyodbc://user:pass@host/db?driver=ODBC+Driver+18+for+SQL+Server` | `pip install ".[sqlserver]"` (+ Microsoft ODBC Driver 18 for pyodbc) |
 | Oracle | `oracle+oracledb://user:pass@host:1521/?service_name=ORCLPDB1` | `pip install ".[oracle]"` |
 | Teradata | `teradatasql://user:pass@host` | `pip install ".[teradata]"` |
 | PostgreSQL | `postgresql+psycopg2://user:pass@host/db` | included |

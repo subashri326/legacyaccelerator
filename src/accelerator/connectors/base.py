@@ -17,6 +17,27 @@ from accelerator.core.secrets import resolve_connection_uri
 
 # How many rows go into one INSERT round trip on engines without a native bulk path.
 INSERT_CHUNK_ROWS = 1000
+# Databricks runs one statement per parameter set, so rows go in as multi-row literal INSERTs.
+DATABRICKS_ROWS_PER_STATEMENT = 500
+# Snowflake refuses a key file in the URL; the accelerator carries it in this parameter instead.
+SNOWFLAKE_KEY_PARAM = "l2c_private_key_file"
+
+
+def make_engine(url: str) -> Any:
+    """Create a SQLAlchemy engine, moving settings drivers refuse in a URL into connect_args."""
+    from sqlalchemy import create_engine
+    from sqlalchemy.engine import make_url
+
+    u = make_url(url)
+    connect_args: dict[str, Any] = {}
+    if u.drivername.startswith("snowflake") and SNOWFLAKE_KEY_PARAM in u.query:
+        connect_args = {
+            "private_key_file": u.query[SNOWFLAKE_KEY_PARAM],
+            "authenticator": "SNOWFLAKE_JWT",
+        }
+        u = u.difference_update_query([SNOWFLAKE_KEY_PARAM])
+    return create_engine(u, future=True, pool_pre_ping=True, connect_args=connect_args)
+
 
 _SIMPLE_IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _RESERVED = {
@@ -261,7 +282,11 @@ class SqlAlchemyConnector(Connector):
         "db_datareader", "db_datawriter", "db_denydatareader", "db_denydatawriter",
         "dbc", "syslib", "sysudtlib", "td_sysfnlib", "system", "xdb", "outln", "ctxsys",
         "mdsys", "ordsys", "dvsys", "lbacsys", "gsmadmin_internal", "appqossys", "dbsfwuser",
-        "audsys", "ojvmsys", "olapsys", "wmsys", "ords_metadata",
+        "audsys", "ojvmsys", "olapsys", "wmsys", "ords_metadata", "anonymous", "dbsnmp", "dip",
+        "ggsys", "gsmcatuser", "gsmuser", "gsmrootuser", "pdbadmin", "remote_scheduler_agent",
+        "sysbackup", "sysdg", "syskm", "sysrac", "sys$umf", "xs$null", "baasys", "dgpdb_int",
+        "mddata", "ords_public_user", "dvf", "ggshareddata", "orddata", "ordplugins",
+        "si_informtn_schema", "opsg_admin", "vecsys",
     })  # fmt: skip
 
     def list_schemas(self) -> list[str]:
@@ -276,9 +301,7 @@ class SqlAlchemyConnector(Connector):
         return list(inspect(self.engine).get_table_names(schema=schema))
 
     def __init__(self, url: str) -> None:
-        from sqlalchemy import create_engine
-
-        self.engine = create_engine(url, future=True, pool_pre_ping=True)
+        self.engine = make_engine(url)
         self.dialect = _SQLA_DIALECTS.get(self.engine.dialect.name, "postgres")
         self.kind = {"postgres": "postgres", "tsql": "sqlserver"}.get(self.dialect, self.dialect)
 
@@ -397,7 +420,65 @@ class SnowflakeConnector(SqlAlchemyConnector):
 
 
 class DatabricksConnector(SqlAlchemyConnector):
-    """Databricks SQL warehouse. Bulk loads from cloud staging use COPY INTO; otherwise INSERTs."""
+    """Databricks SQL warehouse. Bulk loads from cloud staging use COPY INTO; otherwise rows go in
+    as multi-row INSERTs (the driver would otherwise send one request per row)."""
+
+    def write_arrow(self, data: pa.Table, schema: str, name: str) -> int:
+        if data.num_rows == 0:
+            return 0
+        cols = data.column_names
+        head = (
+            f"INSERT INTO {self.qualified(schema, name)} "
+            f"({', '.join(self.quote(c) for c in cols)}) VALUES\n"
+        )
+        rows = data.to_pylist()
+        with self.engine.connect() as conn:
+            raw = conn.connection.dbapi_connection
+            cur = raw.cursor()
+            try:
+                for start in range(0, len(rows), DATABRICKS_ROWS_PER_STATEMENT):
+                    chunk = rows[start : start + DATABRICKS_ROWS_PER_STATEMENT]
+                    values = ",\n".join(
+                        "(" + ", ".join(databricks_literal(r[c]) for c in cols) + ")" for r in chunk
+                    )
+                    cur.execute(head + values)
+            finally:
+                cur.close()
+        return data.num_rows
+
+
+def databricks_literal(v: Any) -> str:
+    """A Databricks SQL literal for one Python value (strings escape backslashes too)."""
+    import datetime as dt
+    import decimal
+    import json
+    import math
+
+    if v is None:
+        return "NULL"
+    if isinstance(v, bool):
+        return "TRUE" if v else "FALSE"
+    if isinstance(v, int):
+        return str(v)
+    if isinstance(v, float):
+        return repr(v) + "D" if math.isfinite(v) else f"CAST('{v!r}' AS DOUBLE)"
+    if isinstance(v, decimal.Decimal):
+        return f"{v:f}" if v.is_finite() else "NULL"
+    if isinstance(v, dt.datetime):
+        if v.tzinfo is not None:
+            utc = v.astimezone(dt.UTC).replace(tzinfo=None)
+            return f"TIMESTAMP '{utc.isoformat(sep=' ')}+00:00'"
+        return f"TIMESTAMP_NTZ '{v.isoformat(sep=' ')}'"
+    if isinstance(v, dt.date):
+        return f"DATE '{v.isoformat()}'"
+    if isinstance(v, dt.time | dt.timedelta):
+        v = str(v)
+    if isinstance(v, bytes | bytearray | memoryview):
+        return f"X'{bytes(v).hex()}'"
+    if isinstance(v, dict | list):
+        v = json.dumps(v, default=str)
+    text = str(v).replace("\\", "\\\\").replace("'", "\\'")
+    return f"'{text}'"
 
 
 class FabricConnector(SqlAlchemyConnector):

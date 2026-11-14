@@ -1,0 +1,51 @@
+# The two "old systems" for the live demo, running on your laptop.
+#
+#   docker compose -f demo/docker-compose.yml up -d
+#
+# Oracle Database 23ai Free  -> localhost:1521, service FREEPDB1
+# SQL Server 2022 Developer  -> localhost:1433
+#
+# Both are free for development and demos. Passwords below are demo-only; change them if the
+# laptop is shared. Data survives restarts in the named volumes; `down -v` deletes it.
+name: l2c-demo
+
+services:
+  oracle:
+    image: gvenzl/oracle-free:23-slim-faststart
+    container_name: l2c-oracle
+    environment:
+      ORACLE_PASSWORD: L2cDemo2026 # password for SYS and SYSTEM
+    ports:
+      - "1521:1521"
+    volumes:
+      - oracle-data:/opt/oracle/oradata
+    healthcheck:
+      test: ["CMD", "healthcheck.sh"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: l2c-sqlserver
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_PID: Developer
+      MSSQL_SA_PASSWORD: L2c_Demo_2026!
+    ports:
+      - "1433:1433"
+    volumes:
+      - sqlserver-data:/var/opt/mssql
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P "$$MSSQL_SA_PASSWORD" -Q "SELECT 1" -b -o /dev/null
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
+volumes:
+  oracle-data:
+  sqlserver-data:
