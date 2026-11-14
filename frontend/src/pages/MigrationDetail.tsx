@@ -376,7 +376,9 @@ function DataTab({ id }: { id: string }) {
   if (recon.error) return <Notice tone="bad">{recon.error}</Notice>;
   if (!recon.data || !loads.data) return <Spinner />;
   const rows = new Map<string, { rowsCopied?: number; load?: string; verdict?: string; src?: number; tgt?: number; diff?: Record<string, unknown> }>();
-  for (const l of loads.data) rows.set(l.object_key, { ...rows.get(l.object_key), rowsCopied: l.rows_loaded, load: l.status });
+  // Newest first: keep each table's latest copy attempt.
+  for (const l of loads.data)
+    if (!rows.has(l.object_key)) rows.set(l.object_key, { rowsCopied: l.rows_loaded, load: l.status });
   for (const r of recon.data)
     rows.set(r.object_key, {
       ...rows.get(r.object_key),

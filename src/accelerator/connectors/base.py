@@ -286,7 +286,7 @@ class SqlAlchemyConnector(Connector):
         "ggsys", "gsmcatuser", "gsmuser", "gsmrootuser", "pdbadmin", "remote_scheduler_agent",
         "sysbackup", "sysdg", "syskm", "sysrac", "sys$umf", "xs$null", "baasys", "dgpdb_int",
         "mddata", "ords_public_user", "dvf", "ggshareddata", "orddata", "ordplugins",
-        "si_informtn_schema", "opsg_admin", "vecsys",
+        "si_informtn_schema", "opsg_admin", "vecsys", "baassys", "ggsharedcap",
     })  # fmt: skip
 
     def list_schemas(self) -> list[str]:
@@ -414,6 +414,9 @@ class SnowflakeConnector(SqlAlchemyConnector):
             ok, _chunks, nrows, _ = write_pandas(
                 raw, df, table_name=name.upper(), schema=schema.upper(), quote_identifiers=False
             )
+            # The Snowflake dialect turns autocommit off: without this the COPY is rolled back
+            # when the connection closes, and the table stays empty.
+            raw.commit()
         if not ok:
             raise RuntimeError(f"Snowflake write_pandas failed for {schema}.{name}")
         return int(nrows)

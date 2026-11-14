@@ -61,6 +61,17 @@ def _single_key(table: TableIR) -> str | None:
     return pks[0] if len(pks) == 1 else None
 
 
+_LOB = re.compile(
+    r"^\s*(N?CLOB|BLOB|BFILE|LONG|TEXT|NTEXT|IMAGE|XML|XMLTYPE|BYTEA|JSONB?|VARIANT|"
+    r"(N?VAR(CHAR|BINARY))\s*\(\s*MAX\s*\))",
+    re.IGNORECASE,
+)
+
+
+def _is_lob(data_type: str) -> bool:
+    return bool(_LOB.match(data_type or ""))
+
+
 def _page_query(
     src: Connector,
     table: TableIR,
@@ -84,10 +95,15 @@ def _page_query(
         conds.append(exp.column(src.quote(key)) > exp.convert(after_key))
     if conds:
         q = q.where(exp.and_(*conds))
-    order = [exp.column(src.quote(key))] if key else cols
+    # Without a key, page in a stable order over every column the engine can sort by: Oracle
+    # (and others) refuse to sort by large-object columns such as CLOB/BLOB.
+    sortable = [c for c, col in zip(cols, table.columns, strict=True) if not _is_lob(col.data_type)]
+    order = [exp.column(src.quote(key))] if key else (sortable or cols)
     if not key and offset and src.dialect == "teradata":
         # Teradata has no OFFSET: number the rows and keep this page's range.
-        rn = exp.Window(this=exp.RowNumber(), order=exp.Order(expressions=[c.copy() for c in cols]))
+        rn = exp.Window(
+            this=exp.RowNumber(), order=exp.Order(expressions=[c.copy() for c in order])
+        )
         q.set(
             "qualify",
             exp.Qualify(

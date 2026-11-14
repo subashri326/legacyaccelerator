@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, field
 
 from sqlalchemy.orm import Session
@@ -22,6 +23,8 @@ from accelerator.db.repository import get_active_config, record_audit, table_ir_
 from accelerator.engines.state_machine import STATE_ORDER, ObjectState, StateMachine
 from accelerator.plugins.interfaces import PartitionResult
 from accelerator.plugins.registry import PluginRegistry, get_plugin_registry
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -196,6 +199,7 @@ class MoveEngine:
                         on_partition=_checkpoint,
                     )
                 except Exception as exc:
+                    logger.error("Copying %s failed: %s", obj.fqn, exc)
                     db.rollback()
                     load_run.status = "failed"
                     load_run.evidence_uri = self.store.put_text(
