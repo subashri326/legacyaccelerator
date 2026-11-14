@@ -203,9 +203,15 @@ class FlowSqlBuilder:
         self.nodes = {n.id: n for n in flow.nodes}
 
     # -- helpers -------------------------------------------------------------------------------
+    def _approved(self, key: str) -> str | None:
+        """The reviewer's replacement for an approved item ('' = not needed), else None."""
+        return self.accepted[key].strip().rstrip(";") if key in self.accepted else None
+
     def _residue(
         self, node: NodeIR, code: str, detail: str, snippet: str = "", key: str | None = None
     ) -> None:
+        if (key or node.id) in self.accepted:
+            return  # a reviewer already decided this item; never raise it again
         self.residues.append(
             GeneratedResidue(
                 object_key=self.pkg.id,
@@ -401,6 +407,20 @@ class FlowSqlBuilder:
 
     def _op_filter(self, node: NodeIR, inputs: list[Rel]) -> None:
         cond = node.condition
+        approved = self._approved(node.id)
+        if approved is not None and (cond is None or cond.is_opaque or not cond.neutral_sql):
+            inp = inputs[0]
+            if not approved:
+                self._passthrough(node, inputs)
+                return
+            self.out[node.id] = {
+                DEFAULT_BRANCH: self._add(
+                    node.name,
+                    f"SELECT {self._cols(inp)} FROM {inp.name} WHERE {approved}  -- reviewed",
+                    inp.columns,
+                )
+            }
+            return
         if cond is None or cond.is_opaque or not cond.neutral_sql:
             self._residue(
                 node,
@@ -436,6 +456,10 @@ class FlowSqlBuilder:
                 )
                 continue
             col = self.r.col(e.target_column)
+            approved = self._approved(f"{node.id}:{col}")
+            if (e.is_opaque or not e.neutral_sql) and approved is not None:
+                derived[col] = approved or "NULL"
+                continue
             if e.is_opaque or not e.neutral_sql:
                 self._residue(
                     node,
@@ -769,11 +793,16 @@ class FlowSqlBuilder:
                     if c.nullable:
                         proj.append(f"NULL AS {tc}")
                     else:
-                        self._residue(
-                            node,
-                            "TARGET_COLUMN_UNMAPPED",
-                            f"Required target column '{tc}' is not mapped.",
-                        )
+                        approved = self._approved(f"{node.id}:{tc}")
+                        if approved is not None:
+                            proj.append(f"{approved or 'NULL'} AS {tc}")
+                        else:
+                            self._residue(
+                                node,
+                                "TARGET_COLUMN_UNMAPPED",
+                                f"Required target column '{tc}' is not mapped.",
+                                key=f"{node.id}:{tc}",
+                            )
         elif table is not None:
             if inp.columns is None:
                 self._residue(
@@ -790,11 +819,16 @@ class FlowSqlBuilder:
                     elif c.nullable:
                         proj.append(f"NULL AS {tc}")
                     else:
-                        self._residue(
-                            node,
-                            "TARGET_COLUMN_UNMAPPED",
-                            f"Required target column '{tc}' is not produced by the flow or mapped.",
-                        )
+                        approved = self._approved(f"{node.id}:{tc}")
+                        if approved is not None:
+                            proj.append(f"{approved or 'NULL'} AS {tc}")
+                        else:
+                            self._residue(
+                                node,
+                                "TARGET_COLUMN_UNMAPPED",
+                                f"Required target column '{tc}' is not produced by the flow or mapped.",
+                                key=f"{node.id}:{tc}",
+                            )
         else:
             proj = [self._cols(inp)]
         target_name = (node.table_ref or node.name).replace("[", "").replace("]", "").split(".")[-1]

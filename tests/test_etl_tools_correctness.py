@@ -176,3 +176,120 @@ def test_datastage_logic_without_exact_sql_is_flagged(isolated_env: Path) -> Non
               "Join_Products", "Xfm_Line", "Funnel_Customers", "Sort_Customers",
               "RemDup_Customers"}  # fmt: skip
     assert not {n.split(".")[0] for n in names} & proven, found
+
+
+def test_approved_items_stay_approved_and_their_code_is_used(isolated_env: Path) -> None:
+    """Found in the live demo: approving unmapped columns, filters and expressions did not stick;
+    the next run raised them again."""
+    from accelerator.engines.convert import ConvertEngine
+
+    pid, _src, _tgt = _setup(isolated_env, "databricks")
+    code_for = {
+        "FILTER_CONDITION_UNKNOWN": "region = 'EMEA'",
+        "EXPRESSION_OPAQUE": "SUM(gross_amount) OVER (PARTITION BY customer_id ORDER BY order_id)",
+    }
+    jobs = ("acme_jobs", "wf_acme_orders", "Load_Finance_GL")
+    with session_scope() as db:
+        items = [
+            i
+            for i in db.query(ResidueItem).filter(ResidueItem.project_id == pid).all()
+            if i.object_key.split(".")[-1] in jobs or i.object_key in jobs
+        ]
+        unmapped = [i for i in items if i.reason_code == "TARGET_COLUMN_UNMAPPED"]
+        assert len({i.component_key for i in unmapped}) == len(unmapped)  # one id per column
+        kinds = {i.reason_code for i in items}
+        assert {"FILTER_CONDITION_UNKNOWN", "EXPRESSION_OPAQUE"} <= kinds
+        for i in items:
+            ConvertEngine().decide_residue(
+                db, pid, i.id, "approved", code_for.get(i.reason_code, ""), "", "test", "admin"
+            )
+        db.commit()
+        ConvertEngine().run(db, pid)
+        db.commit()
+        again = [
+            (i.object_key, i.component_name, i.reason_code)
+            for i in db.query(ResidueItem)
+            .filter(ResidueItem.project_id == pid, ResidueItem.status == "open")
+            .all()
+            if i.object_key.split(".")[-1] in jobs or i.object_key in jobs
+        ]
+    assert again == []
+    code = "\n".join(_artifacts(pid).values())
+    assert "SUM(gross_amount) OVER (PARTITION BY customer_id ORDER BY order_id)" in code
+
+
+def test_approved_filter_and_column_values_are_used() -> None:
+    from accelerator.config.client_config import ClientConfig, SourceConfig, TargetConfig
+    from accelerator.ir.models import (
+        ColumnIR,
+        DataFlowGraphIR,
+        EdgeIR,
+        ExpressionIR,
+        NodeIR,
+        NodeOperator,
+        PackageIR,
+        TableIR,
+    )
+    from accelerator.plugins.generators.databricks import DatabricksGenerator
+
+    cfg = ClientConfig(
+        client="t",
+        source=SourceConfig(database="sqlserver", etl="datastage"),
+        target=TargetConfig(platform="databricks", output="dbt"),
+    )
+    cols = [ColumnIR(name="id", data_type="INT", nullable=False, ordinal_position=1)]
+    tables = {
+        "acme.dbo.src": TableIR(database="acme", schema_name="dbo", name="src", columns=cols),
+        "acme.dbo.tgt": TableIR(
+            database="acme",
+            schema_name="dbo",
+            name="tgt",
+            columns=[
+                *cols,
+                ColumnIR(
+                    name="region", data_type="VARCHAR(10)", nullable=False, ordinal_position=2
+                ),
+            ],
+        ),
+    }
+    flow = DataFlowGraphIR(
+        id="f",
+        name="f",
+        nodes=[
+            NodeIR(id="s", name="s", operator=NodeOperator.SOURCE, table_ref="dbo.src"),
+            NodeIR(
+                id="flt",
+                name="flt",
+                operator=NodeOperator.FILTER,
+                condition=ExpressionIR(id="c", original_expr="#pRegion# = 'EMEA'", is_opaque=True),
+            ),
+            NodeIR(id="t", name="t", operator=NodeOperator.TARGET, table_ref="dbo.tgt"),
+        ],
+        edges=[
+            EdgeIR(id="e1", source_node_id="s", target_node_id="flt"),
+            EdgeIR(id="e2", source_node_id="flt", target_node_id="t"),
+        ],
+    )
+    pkg = PackageIR(
+        id="job", name="job", source_tool="datastage", source_artifact_name="j", data_flows=[flow]
+    )
+    gen = DatabricksGenerator()
+    before = gen.generate_package(pkg, tables, cfg)
+    assert {r.reason_code for r in before.residues} == {
+        "FILTER_CONDITION_UNKNOWN",
+        "TARGET_COLUMN_UNMAPPED",
+    }
+    keys = {r.reason_code: r.component_key for r in before.residues}
+    after = gen.generate_package(
+        pkg,
+        tables,
+        cfg,
+        accepted_overrides={
+            keys["FILTER_CONDITION_UNKNOWN"]: ":pRegion = 'EMEA'",
+            keys["TARGET_COLUMN_UNMAPPED"]: "'EMEA'",
+        },
+    )
+    assert after.residues == []
+    sql = "\n".join(f.content for f in after.files)
+    assert "WHERE :pRegion = 'EMEA'  -- reviewed" in sql
+    assert "'EMEA' AS region" in sql
