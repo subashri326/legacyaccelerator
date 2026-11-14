@@ -312,3 +312,43 @@ def test_snowflake_test_fails_when_the_database_is_missing() -> None:
     with pytest.raises(ValueError, match="database L2C_DEMO was not found"):
         _check_context(sf, {"database": "L2C_DEMO"}, Conn((None, "COMPUTE_WH")))
     _check_context(sf, {"database": "L2C_DEMO"}, Conn(("L2C_DEMO", "COMPUTE_WH")))
+
+
+def test_time_zone_columns_are_compared_as_utc_instants() -> None:
+    from sqlglot import exp
+
+    from accelerator.connectors.base import DuckDBConnector
+    from accelerator.ir.models import ColumnIR, TableIR
+    from accelerator.plugins.validators.sql_validator import _kind, _utc
+
+    assert _kind("TIMESTAMP(6) WITH TIME ZONE") == "tstz"
+    assert _kind("TIMESTAMP_TZ(6)") == "tstz"
+    assert _kind("TIMESTAMP_NTZ(0)") == "other"
+
+    class Conn:
+        def __init__(self, d: str) -> None:
+            self.dialect = d
+
+    col = exp.column("updated_ts")
+    assert _utc(Conn("oracle"), col).sql("oracle") == "SYS_EXTRACT_UTC(updated_ts)"  # type: ignore[arg-type]
+    assert "CONVERT_TIMEZONE('UTC', updated_ts)" in _utc(Conn("snowflake"), col).sql("snowflake")  # type: ignore[arg-type]
+
+    # End to end on DuckDB: the profile query still runs with a time-zoned column.
+    from accelerator.plugins.validators.sql_validator import _profile
+
+    con = DuckDBConnector(":memory:")
+    con.execute("CREATE TABLE t (id INT, ts TIMESTAMPTZ)")
+    con.execute("INSERT INTO t VALUES (1, TIMESTAMPTZ '2026-01-01 10:00:00+05:30'), (2, NULL)")
+    tbl = TableIR(
+        database="m",
+        schema_name="",
+        name="t",
+        columns=[
+            ColumnIR(name="id", data_type="INTEGER", ordinal_position=1),
+            ColumnIR(name="ts", data_type="TIMESTAMP WITH TIME ZONE", ordinal_position=2),
+        ],
+    )
+    prof = _profile(con, tbl, [_kind(c.data_type) for c in tbl.columns], "L2", "id")
+    assert prof["row_count"] == 2
+    assert prof["columns"]["ts"]["max"] == "2026-01-01 04:30:00"
+    assert prof["columns"]["ts"]["null_count"] == 1

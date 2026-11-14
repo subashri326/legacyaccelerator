@@ -20,6 +20,7 @@ from datetime import UTC, date, datetime, time
 from decimal import Decimal
 from typing import Any
 
+import sqlglot
 from sqlglot import exp
 
 from accelerator.config.client_config import ClientConfig, ReconOverride
@@ -77,8 +78,28 @@ def _base(dtype: str) -> str:
     return dtype.split("(")[0].strip().upper()
 
 
+_TZ_TYPES = {"TIMESTAMP_TZ", "TIMESTAMPTZ", "TIMESTAMP_LTZ", "DATETIMEOFFSET"}
+# The value as a plain UTC timestamp, per engine. Comparing instants this way is fairer than
+# comparing offsets, and avoids drivers' time-zone conversions (Snowflake's Windows path overflows).
+_UTC_SQL = {
+    "oracle": "SYS_EXTRACT_UTC({c})",
+    "snowflake": "CAST(CONVERT_TIMEZONE('UTC', {c}) AS TIMESTAMP_NTZ)",
+    "tsql": "CAST(SWITCHOFFSET({c}, '+00:00') AS DATETIME2)",
+    "postgres": "({c} AT TIME ZONE 'UTC')",
+}
+
+
+def _utc(conn: Connector, c: exp.Expression) -> exp.Expression:
+    template = _UTC_SQL.get(conn.dialect)
+    if not template:
+        return c
+    return sqlglot.parse_one(template.format(c=c.sql(dialect=conn.dialect)), read=conn.dialect)
+
+
 def _kind(dtype: str) -> str:
     b = _base(dtype)
+    if "TIME ZONE" in dtype.upper() or b in _TZ_TYPES:
+        return "tstz"
     if b in BOOL_TYPES:
         return "bool"
     if b in NUMERIC_TYPES:
@@ -151,11 +172,12 @@ def _profile(
             sel += [nulls]
             layout += [(col.name, "null_count")]
         else:
+            v = _utc(conn, c.copy()) if kind == "tstz" else c
             sel += [
-                exp.Min(this=c.copy()),
-                exp.Max(this=c.copy()),
+                exp.Min(this=v.copy()),
+                exp.Max(this=v.copy()),
                 nulls,
-                exp.Count(this=exp.Distinct(expressions=[c.copy()])),
+                exp.Count(this=exp.Distinct(expressions=[v.copy()])),
             ]
             layout += [(col.name, s) for s in ("min", "max", "null_count", "distinct_count")]
     row = conn.query(conn.render(exp.select(*sel).from_(t)))[0]

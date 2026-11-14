@@ -379,7 +379,10 @@ function DataTab({ id }: { id: string }) {
   // Newest first: keep each table's latest copy attempt.
   for (const l of loads.data)
     if (!rows.has(l.object_key)) rows.set(l.object_key, { rowsCopied: l.rows_loaded, load: l.status });
-  for (const r of recon.data)
+  const seen = new Set<string>();
+  for (const r of recon.data) {
+    if (seen.has(r.object_key)) continue; // newest first: keep each table's latest check
+    seen.add(r.object_key);
     rows.set(r.object_key, {
       ...rows.get(r.object_key),
       verdict: r.verdict,
@@ -387,6 +390,7 @@ function DataTab({ id }: { id: string }) {
       tgt: r.target_metrics.row_count,
       diff: r.diff_summary,
     });
+  }
   if (!rows.size) return <Empty title="No data copied yet">The "Copy the data" step fills this in.</Empty>;
   return (
     <div className="card">
