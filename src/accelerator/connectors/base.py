@@ -412,7 +412,14 @@ class SnowflakeConnector(SqlAlchemyConnector):
             df = data.to_pandas()
             df.columns = [c.upper() for c in df.columns]
             ok, _chunks, nrows, _ = write_pandas(
-                raw, df, table_name=name.upper(), schema=schema.upper(), quote_identifiers=False
+                raw,
+                df,
+                table_name=name.upper(),
+                schema=schema.upper(),
+                quote_identifiers=False,
+                # Without this Snowflake reads Parquet timestamps as bare numbers in the wrong
+                # unit (microseconds taken as seconds: 2025 became the year 55,418,145).
+                use_logical_type=True,
             )
             # The Snowflake dialect turns autocommit off: without this the COPY is rolled back
             # when the connection closes, and the table stays empty.
