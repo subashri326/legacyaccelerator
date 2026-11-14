@@ -400,6 +400,7 @@ def test_connection(
         uri = ct.build_uri(values)
         with open_connector(uri, read_only=True) as conn:
             conn.query(ct.test_query)
+            _check_context(ct, values, conn)
             detail = _describe(conn)
         return TestResult(True, f"Connected to {ct.name}.{detail}", time.monotonic() - started)
     except ModuleNotFoundError as exc:
@@ -411,6 +412,24 @@ def test_connection(
         )
     except Exception as exc:
         return TestResult(False, _friendly(str(exc)), time.monotonic() - started)
+
+
+def _check_context(ct: ConnectorType, values: dict[str, Any], conn: Any) -> None:
+    """Snowflake signs in without complaint when the database is missing or not visible to the
+    role, and every later CREATE then fails. Catch that while testing the connection."""
+    if ct.id != "snowflake":
+        return
+    db, wh = conn.query("SELECT CURRENT_DATABASE(), CURRENT_WAREHOUSE()")[0]
+    if not db:
+        raise ValueError(
+            f"Signed in, but database {values.get('database')} was not found or this role "
+            "cannot use it. Create it in Snowflake (CREATE DATABASE ...) or check the role."
+        )
+    if not wh:
+        raise ValueError(
+            f"Signed in, but warehouse {values.get('warehouse')} was not found or this role "
+            "cannot use it."
+        )
 
 
 def _describe(conn: Any) -> str:

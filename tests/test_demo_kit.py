@@ -241,3 +241,74 @@ def test_demo_data_and_objects() -> None:
                 sqlglot.parse_one(ddl, read=dialect)
     compose = (ROOT / "demo" / "docker-compose.yml").read_text()
     assert "gvenzl/oracle-free" in compose and "mssql/server:2022" in compose
+
+
+# ---------------------------------------------------------------- found in the first live run
+def test_tables_without_a_key_are_never_sorted_by_large_objects() -> None:
+    from accelerator.connectors.base import DuckDBConnector
+    from accelerator.ir.models import ColumnIR, TableIR
+    from accelerator.plugins.movers.parquet_mover import _page_query
+
+    tbl = TableIR(
+        database="FREEPDB1",
+        schema_name="sales",
+        name="orders_archive",
+        columns=[
+            ColumnIR(name="order_id", data_type="NUMBER(12, 0)", ordinal_position=1),
+            ColumnIR(name="note", data_type="VARCHAR2(400 CHAR)", ordinal_position=2),
+            ColumnIR(name="payload", data_type="CLOB", ordinal_position=3),
+        ],
+    )
+    src = DuckDBConnector(":memory:")
+    src.dialect = "oracle"
+    sql = _page_query(src, tbl, None, None, None, None, 50_000, 0)
+    order_by = sql.upper().split("ORDER BY")[1]
+    assert "ORDER_ID" in order_by and "NOTE" in order_by and "PAYLOAD" not in order_by
+
+
+def test_snowflake_load_is_committed(monkeypatch: pytest.MonkeyPatch) -> None:
+    import sys
+    import types
+
+    calls: list[str] = []
+
+    class Raw:
+        def commit(self) -> None:
+            calls.append("commit")
+
+    class Ctx:
+        connection = type("C", (), {"dbapi_connection": Raw()})()
+
+        def __enter__(self) -> Ctx:
+            return self
+
+        def __exit__(self, *_a: Any) -> None:
+            calls.append("close")
+
+    def fake_write_pandas(raw: Any, df: Any, **kw: Any) -> tuple[bool, int, int, Any]:
+        calls.append(f"write {kw['schema']}.{kw['table_name']}")
+        return True, 1, len(df), None
+
+    mod = types.ModuleType("snowflake.connector.pandas_tools")
+    mod.write_pandas = fake_write_pandas  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "snowflake.connector.pandas_tools", mod)
+    conn = connectors.SnowflakeConnector.__new__(connectors.SnowflakeConnector)
+    conn.engine = type("E", (), {"connect": lambda self: Ctx()})()
+    assert conn.write_arrow(pa.table({"id": [1, 2, 3]}), "curated_sales", "orders") == 3
+    assert calls == ["write CURATED_SALES.ORDERS", "commit", "close"]
+
+
+def test_snowflake_test_fails_when_the_database_is_missing() -> None:
+    from accelerator.connectors.catalog import _check_context
+
+    class Conn:
+        def __init__(self, row: tuple[Any, Any]) -> None:
+            self.row = row
+
+        def query(self, _sql: str) -> list[tuple[Any, Any]]:
+            return [self.row]
+
+    sf = CATALOG["snowflake"]
+    with pytest.raises(ValueError, match="database L2C_DEMO was not found"):
+        _check_context(sf, {"database": "L2C_DEMO"}, Conn((None, "COMPUTE_WH")))
+    _check_context(sf, {"database": "L2C_DEMO"}, Conn(("L2C_DEMO", "COMPUTE_WH")))
