@@ -274,6 +274,30 @@ _SYSTEM_SCHEMAS = {
 }
 
 
+def _ident(dialect: str, name: str) -> str:
+    """Plain names stay unquoted so each engine applies its own case rule (Oracle upper-cases
+    them; SQLAlchemy reports them lower-case). Others are quoted the engine's way."""
+    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$#]*", name):
+        return name
+    return f"[{name}]" if dialect == "mssql" else '"' + name.replace('"', '""') + '"'
+
+
+def _type_text(col_type: Any, dialect: Any) -> str:
+    """The column type as the source database writes it (e.g. NUMBER(10, 0), VARCHAR2(120 CHAR)).
+
+    ``str(type)`` would use a generic form that drops Oracle precision and time zones.
+    """
+    if getattr(dialect, "name", "") == "mssql":
+        from sqlalchemy.dialects import mssql
+
+        if isinstance(col_type, mssql.TIMESTAMP):  # SQL Server TIMESTAMP is a row counter
+            return "ROWVERSION"
+    try:
+        return str(col_type.compile(dialect=dialect))
+    except Exception:
+        return str(col_type)
+
+
 def _row_count(conn: Any, dialect: str, schema: str, name: str) -> int | None:
     """Cheap row count from catalog statistics where the engine has them, else COUNT(*)."""
     from sqlalchemy import text
@@ -300,11 +324,7 @@ def _row_count(conn: Any, dialect: str, schema: str, name: str) -> int | None:
             ).scalar()
             if r is not None and r >= 0:
                 return int(r)
-        q = (
-            f'SELECT COUNT(*) FROM "{schema}"."{name}"'
-            if dialect != "mssql"
-            else f"SELECT COUNT(*) FROM [{schema}].[{name}]"
-        )
+        q = f"SELECT COUNT(*) FROM {_ident(dialect, schema)}.{_ident(dialect, name)}"
         return int(conn.execute(text(q)).scalar() or 0)
     except Exception:
         return None
@@ -322,6 +342,8 @@ def _procedures(
         "JOIN pg_namespace n ON n.oid = p.pronamespace WHERE p.prokind = 'p' "
         "AND n.nspname NOT IN ('pg_catalog', 'information_schema')",
     }
+    if dialect == "oracle":
+        return _oracle_procedures(conn, db_name, allowed)
     if dialect not in queries:
         return []
     out: list[ProcedureIR] = []
@@ -354,6 +376,66 @@ def _procedures(
     return out
 
 
+def _oracle_procedures(conn: Any, db_name: str, allowed: set[str] | None) -> list[ProcedureIR]:
+    """Oracle keeps stored code line by line in ALL_SOURCE; join it back into whole procedures."""
+    from sqlalchemy import text
+
+    try:
+        rows = conn.execute(
+            text(
+                "SELECT owner, name, line, text FROM all_source "
+                "WHERE type IN ('PROCEDURE', 'FUNCTION', 'PACKAGE BODY') "
+                "AND owner NOT IN ('SYS', 'SYSTEM', 'XDB', 'MDSYS', 'CTXSYS', 'ORDSYS', "
+                "'DVSYS', 'LBACSYS', 'WMSYS', 'OLAPSYS', 'GSMADMIN_INTERNAL', 'AUDSYS', "
+                "'OJVMSYS', 'DBSNMP', 'APPQOSSYS', 'DBSFWUSER', 'ORDS_METADATA') "
+                "ORDER BY owner, name, type, line"
+            )
+        ).fetchall()
+    except Exception:
+        return []
+    bodies: dict[tuple[str, str], list[str]] = {}
+    for owner, name, _line, line_text in rows:
+        if allowed and str(owner).lower() not in allowed:
+            continue
+        bodies.setdefault((str(owner), str(name)), []).append(line_text or "")
+    out = []
+    for (owner, name), lines in bodies.items():
+        body = "CREATE OR REPLACE " + "".join(lines).strip()
+        out.append(
+            ProcedureIR(
+                database=db_name,
+                schema_name=owner.lower(),
+                name=name.lower(),
+                source_dialect="oracle",
+                definition_sql=body,
+                referenced_tables=sorted(
+                    set(
+                        re.findall(
+                            r"\b(?:FROM|JOIN)\s+([A-Za-z0-9_]+\.[A-Za-z0-9_]+)", body, re.IGNORECASE
+                        )
+                    )
+                ),
+                target_tables=sorted(
+                    set(
+                        re.findall(
+                            r"\b(?:INSERT\s+INTO|UPDATE|MERGE\s+INTO|DELETE\s+FROM)\s+"
+                            r"([A-Za-z0-9_]+\.[A-Za-z0-9_]+)",
+                            body,
+                            re.IGNORECASE,
+                        )
+                    )
+                ),
+                has_dynamic_sql=bool(
+                    re.search(r"EXECUTE\s+IMMEDIATE|DBMS_SQL", body, re.IGNORECASE)
+                ),
+                has_cursors=bool(
+                    re.search(r"\bCURSOR\b|\bFOR\s+\w+\s+IN\s*\(", body, re.IGNORECASE)
+                ),
+            )
+        )
+    return out
+
+
 def harvest_sqlalchemy_catalog(
     url: str,
     source_system: str,
@@ -362,9 +444,11 @@ def harvest_sqlalchemy_catalog(
     """Harvest any engine with a SQLAlchemy dialect (SQL Server, PostgreSQL, Oracle, SQLite...)
     through the standard inspector: tables, columns, primary and foreign keys, views, procedures,
     row counts. Read-only."""
-    from sqlalchemy import create_engine, inspect
+    from sqlalchemy import inspect
 
-    engine = create_engine(url, future=True)
+    from accelerator.connectors.base import make_engine
+
+    engine = make_engine(url)
     dialect = engine.dialect.name
     db_name = engine.url.database or source_system
     if dialect == "sqlite":
@@ -404,7 +488,7 @@ def harvest_sqlalchemy_catalog(
                     cols = [
                         ColumnIR(
                             name=c["name"],
-                            data_type=str(c["type"]),
+                            data_type=_type_text(c["type"], engine.dialect),
                             nullable=bool(c.get("nullable", True)) and c["name"].lower() not in pk,
                             is_primary_key=c["name"].lower() in pk,
                             is_foreign_key=c["name"].lower() in fk_map,
@@ -428,7 +512,13 @@ def harvest_sqlalchemy_catalog(
                     except Exception:
                         definition = ""
                     if definition and not definition.lstrip().upper().startswith("CREATE"):
-                        definition = f"CREATE VIEW {schema_name}.{vname} AS {definition}"
+                        # Oracle keeps only the query; its column names come from the view.
+                        try:
+                            vcols = [c["name"] for c in insp.get_columns(vname, schema=sch)]
+                        except Exception:
+                            vcols = []
+                        col_list = f" ({', '.join(vcols)})" if vcols else ""
+                        definition = f"CREATE VIEW {schema_name}.{vname}{col_list} AS {definition}"
                     views.append(
                         ViewIR(
                             database=db_name,

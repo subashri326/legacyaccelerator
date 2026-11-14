@@ -81,5 +81,5 @@ class SnowflakeGenerator(BaseTargetGenerator):
             columns=[ColumnIR(name="order_id", data_type="INT", nullable=False)],
         )
         ddl = self.generate_ddl(tbl, cfg)
-        ok = ddl.compile_passed and "NUMBER(38,0)" in ddl.content
+        ok = ddl.compile_passed and "NUMBER(10,0)" in ddl.content
         return ok, "SnowflakeGenerator golden check passed" if ok else ddl.compile_log

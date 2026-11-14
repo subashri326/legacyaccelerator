@@ -38,13 +38,22 @@ dependencies = [
 
 [project.optional-dependencies]
 # Database drivers, one extra per engine; `connectors` installs them all.
-sqlserver = ["pyodbc>=5.1.0"]  # SQL Server and Microsoft Fabric (needs Microsoft ODBC Driver 18)
+sqlserver = ["pymssql>=2.3.0", "pyodbc>=5.1.0"]  # pymssql needs nothing else; pyodbc needs Microsoft's ODBC driver
 oracle = ["oracledb>=2.4.0"]
 teradata = ["teradatasqlalchemy>=20.0.0.9"]
 snowflake = ["snowflake-sqlalchemy>=1.7.0", "snowflake-connector-python[pandas]>=3.12.0"]
 databricks = ["databricks-sqlalchemy>=2.0.0"]
 cloud-storage = ["boto3>=1.35.0", "azure-storage-blob>=12.22.0"]
+# Everything the Oracle / SQL Server -> Snowflake / Databricks demo needs (see demo/README.md).
+demo = [
+    "pymssql>=2.3.0",
+    "oracledb>=2.4.0",
+    "snowflake-sqlalchemy>=1.7.0",
+    "snowflake-connector-python[pandas]>=3.12.0",
+    "databricks-sqlalchemy>=2.0.0",
+]
 connectors = [
+    "pymssql>=2.3.0",
     "pyodbc>=5.1.0",
     "oracledb>=2.4.0",
     "teradatasqlalchemy>=20.0.0.9",

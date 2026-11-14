@@ -71,8 +71,15 @@ def _oracle(s: dict[str, Any]) -> str:
 
 
 def _sqlserver(s: dict[str, Any]) -> str:
+    driver = s.get("driver") or s.get("odbc_driver") or PYMSSQL
+    if driver == PYMSSQL:
+        # Pure Python wheel (bundles FreeTDS): nothing else to install on the machine.
+        return (
+            f"mssql+pymssql://{_q(s['username'])}:{_q(s['password'])}@{s['host']}:"
+            f"{s.get('port') or 1433}/{_q(s['database'])}?charset=utf8&tds_version=7.4"
+        )
     params = {
-        "driver": s.get("odbc_driver") or "ODBC Driver 18 for SQL Server",
+        "driver": driver,
         "Encrypt": "yes" if s.get("encrypt", True) else "no",
         "TrustServerCertificate": "yes" if s.get("trust_server_certificate") else "no",
     }
@@ -95,10 +102,22 @@ def _postgres(s: dict[str, Any]) -> str:
 
 
 def _snowflake(s: dict[str, Any]) -> str:
+    from accelerator.connectors.base import SNOWFLAKE_KEY_PARAM
+
     params = {k: s[k] for k in ("warehouse", "role") if s.get(k)}
+    # Compare and load timestamps in UTC, not the account's default (US Pacific) zone.
+    params["timezone"] = "UTC"
+    key_file = str(s.get("private_key_file") or "").strip()
+    if key_file:
+        params[SNOWFLAKE_KEY_PARAM] = key_file
+        auth = _q(s["username"])
+    elif s.get("password"):
+        auth = f"{_q(s['username'])}:{_q(s['password'])}"
+    else:
+        raise ValueError("Enter a password or a private key file")
     path = _q(s["database"]) + (f"/{_q(s['schema'])}" if s.get("schema") else "")
     q = f"?{urlencode(params)}" if params else ""
-    return f"snowflake://{_q(s['username'])}:{_q(s['password'])}@{s['account']}/{path}{q}"
+    return f"snowflake://{auth}@{s['account']}/{path}{q}"
 
 
 def _databricks(s: dict[str, Any]) -> str:
@@ -128,6 +147,7 @@ def _duckdb(s: dict[str, Any]) -> str:
 _HOST = Field("host", "Host", help="Server name or IP address")
 _USER = Field("username", "Username")
 _PASS = Field("password", "Password", type="password")
+PYMSSQL = "pymssql (built in, nothing to install)"
 
 CATALOG: dict[str, ConnectorType] = {
     c.id: c
@@ -162,26 +182,30 @@ CATALOG: dict[str, ConnectorType] = {
                 Field("database", "Database"),
                 _USER,
                 _PASS,
-                Field("encrypt", "Encrypt connection", "boolean", False, True),
+                Field(
+                    "driver",
+                    "Driver",
+                    "select",
+                    False,
+                    PYMSSQL,
+                    "Use an ODBC driver for Azure SQL or when your company requires one.",
+                    (PYMSSQL, "ODBC Driver 18 for SQL Server", "ODBC Driver 17 for SQL Server"),
+                ),
+                Field("encrypt", "Encrypt connection (ODBC)", "boolean", False, True),
                 Field(
                     "trust_server_certificate",
-                    "Trust server certificate",
+                    "Trust server certificate (ODBC)",
                     "boolean",
                     False,
                     False,
                     "Turn on for self-signed certificates (e.g. SQL Server in Docker).",
                 ),
-                Field(
-                    "odbc_driver",
-                    "ODBC driver",
-                    required=False,
-                    default="ODBC Driver 18 for SQL Server",
-                ),
             ),
             _sqlserver,
             "SELECT 1",
             "sqlserver",
-            "Needs the Microsoft ODBC Driver 18 for SQL Server on the machine running the backend.",
+            "The ODBC drivers need Microsoft's ODBC Driver installed on the machine running the "
+            "backend; pymssql needs nothing extra.",
         ),
         ConnectorType(
             "teradata",
@@ -223,7 +247,20 @@ CATALOG: dict[str, ConnectorType] = {
                     help="e.g. abc12345.ap-south-1 or orgname-accountname",
                 ),
                 _USER,
-                _PASS,
+                Field(
+                    "password",
+                    "Password",
+                    "password",
+                    False,
+                    help="Leave blank when signing in with a private key file.",
+                ),
+                Field(
+                    "private_key_file",
+                    "Private key file (key-pair sign-in)",
+                    required=False,
+                    help="Full path to the .p8 key on the machine running the backend. Works "
+                    "when password sign-in is blocked by MFA.",
+                ),
                 Field("database", "Database"),
                 Field("warehouse", "Warehouse", default="COMPUTE_WH"),
                 Field("role", "Role", required=False, default="ACCOUNTADMIN"),

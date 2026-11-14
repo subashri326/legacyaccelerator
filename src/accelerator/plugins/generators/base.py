@@ -201,7 +201,7 @@ class BaseTargetGenerator(TargetGenerator):
         base_token = re.split(r"[\(\s]", col.data_type.strip().upper())[0]
         if col.data_type.upper() in overrides or base_token in overrides:
             return self.map_data_type(col.data_type, config), None
-        if config.source.database in ("oracle", "teradata"):
+        if config.source.database in ("oracle", "teradata", "sqlserver"):
             return map_source_type(
                 col.data_type, config.source.database, self.platform, col.attributes
             )

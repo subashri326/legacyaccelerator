@@ -1,4 +1,4 @@
-"""Source-aware data type mapping for Oracle and Teradata.
+"""Source-aware data type mapping for Oracle, Teradata and SQL Server.
 
 The same type name can mean different things per database, so types are first read as a
 neutral meaning (what values the column can hold) and then written for the target:
@@ -42,6 +42,11 @@ def _int(v: str | None, default: int | None = None) -> int | None:
 
 def read_oracle(t: str, unicode: bool = False) -> Neutral:
     u = re.sub(r"\s+", " ", t.strip().upper())
+    # VARCHAR2(120 CHAR) counts characters (as a live Oracle reports it); (120 BYTE) counts bytes.
+    sem = re.search(r"\(\s*(\d+)\s+(CHAR|BYTE)\s*\)", u)
+    if sem:
+        unicode = unicode or sem.group(2) == "CHAR"
+        u = u[: sem.start()] + f"({sem.group(1)})" + u[sem.end() :]
     base = u.split("(")[0].strip()
     n = _nums(u)
     if base in ("NUMBER", "NUMERIC", "DECIMAL", "DEC"):
@@ -165,6 +170,87 @@ def read_teradata(t: str, unicode: bool = False) -> Neutral:
     )
 
 
+def read_sqlserver(t: str, unicode: bool = False) -> Neutral:
+    """SQL Server types, as a live SQL Server (or its DDL) reports them.
+
+    ``ROWVERSION`` is SQL Server's ``TIMESTAMP`` (a row counter, not a time); the live reader names
+    it ``ROWVERSION`` so a plain ``TIMESTAMP`` here is a date-time (as DuckDB stand-ins report).
+    """
+    u = re.sub(r"\s+COLLATE\s+\S+", "", re.sub(r"\s+", " ", t.strip().upper()))
+    base = u.split("(")[0].strip()
+    n = _nums(u)
+    size = n[0] if n else None
+    if size == "MAX":
+        size = None
+    ints = {"TINYINT": "int16", "SMALLINT": "int16", "INT": "int32", "INTEGER": "int32"}
+    if base in ints:  # TINYINT is 0..255, so it needs 16 bits on engines with a signed byte
+        return Neutral(ints[base])
+    if base in ("BIGINT", "HUGEINT"):
+        return Neutral("int64")
+    if base in ("BIT", "BOOLEAN"):
+        return Neutral("bool")
+    if base in ("DECIMAL", "NUMERIC", "DEC"):
+        return Neutral(
+            "decimal",
+            precision=_int(size, 18),
+            scale=_int(n[1] if len(n) > 1 else None, 0),
+        )
+    if base == "MONEY":
+        return Neutral("decimal", precision=19, scale=4)
+    if base == "SMALLMONEY":
+        return Neutral("decimal", precision=10, scale=4)
+    if base == "FLOAT":
+        return Neutral("float32" if (_int(size, 53) or 53) <= 24 else "float64")
+    if base == "REAL":
+        return Neutral("float32")
+    if base in ("DOUBLE", "DOUBLE PRECISION"):
+        return Neutral("float64")
+    if base in ("VARCHAR", "NVARCHAR", "CHARACTER VARYING"):
+        uni = unicode or base == "NVARCHAR"
+        if size is None:  # VARCHAR(MAX), or no length from a stand-in: unbounded text
+            return Neutral("text", unicode=uni)
+        return Neutral("string", length=_int(size, 1), unicode=uni)
+    if base in ("CHAR", "NCHAR", "CHARACTER"):
+        return Neutral("char", length=_int(size, 1), unicode=unicode or base == "NCHAR")
+    if base in ("TEXT", "NTEXT"):
+        return Neutral("text", unicode=base == "NTEXT", note=f"{base} is deprecated in SQL Server")
+    if base == "XML":
+        return Neutral("text", unicode=True, note="XML is stored as text; parse it on the target.")
+    if base in ("BINARY", "VARBINARY"):
+        return Neutral("blob") if size is None else Neutral("binary", length=_int(size, 1))
+    if base == "IMAGE":
+        return Neutral("blob", note="IMAGE is deprecated in SQL Server")
+    if base == "ROWVERSION":
+        return Neutral(
+            "binary",
+            length=8,
+            note="ROWVERSION is a change counter the database maintains; it is copied as bytes "
+            "and no longer updates itself on the target.",
+        )
+    if base == "UNIQUEIDENTIFIER":
+        return Neutral("string", length=36)
+    if base == "DATE":
+        return Neutral("date")
+    if base == "TIME":
+        return Neutral("time", precision=_int(size, 7))
+    if base in ("DATETIME", "TIMESTAMP"):
+        return Neutral("timestamp", precision=3 if base == "DATETIME" else 6)
+    if base == "SMALLDATETIME":
+        return Neutral("timestamp", precision=0)
+    if base == "DATETIME2":
+        return Neutral("timestamp", precision=_int(size, 7))
+    if base == "DATETIMEOFFSET":
+        return Neutral("timestamptz", precision=_int(size, 7))
+    return Neutral(
+        "unsupported",
+        note=f"SQL Server type {t} has no direct equivalent; stored as "
+        "text. Decide how it should be represented.",
+    )
+
+
+READERS = {"oracle": read_oracle, "teradata": read_teradata, "sqlserver": read_sqlserver}
+
+
 def write(nt: Neutral, platform: str) -> tuple[str, str | None]:
     """Target type for a neutral type, plus a review note when the mapping is not exact."""
     k, note = nt.kind, nt.note
@@ -270,5 +356,5 @@ def map_source_type(
     source_type: str, source_db: str, platform: str, attributes: dict | None = None
 ) -> tuple[str, str | None]:
     attributes = attributes or {}
-    reader = read_oracle if source_db == "oracle" else read_teradata
+    reader = READERS[source_db]
     return write(reader(source_type, bool(attributes.get("unicode"))), platform)
