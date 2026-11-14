@@ -354,3 +354,62 @@ def test_time_zone_columns_are_compared_as_utc_instants() -> None:
     assert prof["row_count"] == 2
     assert prof["columns"]["ts"]["max"] == "2026-01-01 04:30:00"
     assert prof["columns"]["ts"]["null_count"] == 1
+
+
+def test_snowflake_dates_and_times_are_checked_as_text() -> None:
+    """Snowflake's connector 5.x fails converting timestamps on Windows; checks read them as text
+    and convert them back, so both sides still compare as the same date/time."""
+    from accelerator.connectors.base import DuckDBConnector
+    from accelerator.ir.models import ColumnIR, TableIR
+    from accelerator.plugins.validators.sql_validator import _kind, _profile
+
+    sent: list[str] = []
+
+    class FakeSnowflake(DuckDBConnector):
+        def query(self, sql: str, params: Any = None) -> list[tuple[Any, ...]]:
+            sent.append(sql)
+            if "information_schema" in sql:
+                assert params == ["CURATED_SALES", "ORDERS"]
+                return [
+                    ("ORDER_ID", "NUMBER"),
+                    ("ORDER_DATE", "TIMESTAMP_NTZ"),
+                    ("UPDATED_TS", "TIMESTAMP_TZ"),
+                    ("SHIP_DAY", "DATE"),
+                ]
+            # count; order_id: sum,min,max,nulls,distinct; then 3 x (min,max,nulls,distinct)
+            return [
+                (
+                    2,
+                    3.0, 1, 2, 0, 2,
+                    "2025-06-01 08:13:00.000000", "2026-05-28 10:40:00.000000", 0, 2,
+                    "2025-06-01 10:13:00.000000", "2026-05-28 12:40:00.000000", 0, 2,
+                    "2025-06-02", "2026-05-29", 0, 2,
+                )
+            ]  # fmt: skip
+
+    conn = FakeSnowflake(":memory:")
+    conn.dialect = "snowflake"
+    tbl = TableIR(
+        database="L2C_DEMO",
+        schema_name="curated_sales",
+        name="orders",
+        columns=[
+            ColumnIR(name="order_id", data_type="NUMBER(12, 0)", ordinal_position=1),
+            ColumnIR(name="order_date", data_type="DATE", ordinal_position=2),
+            ColumnIR(
+                name="updated_ts", data_type="TIMESTAMP(6) WITH TIME ZONE", ordinal_position=3
+            ),
+            ColumnIR(name="ship_day", data_type="DATE", ordinal_position=4),
+        ],
+    )
+    prof = _profile(conn, tbl, [_kind(c.data_type) for c in tbl.columns], "L2", "order_id")
+    check_sql = sent[-1]
+    assert "TO_VARCHAR(MIN(order_date), 'YYYY-MM-DD HH24:MI:SS.FF6')" in check_sql
+    assert "CONVERT_TIMEZONE('UTC', updated_ts)" in check_sql
+    assert "TO_VARCHAR(MAX(ship_day), 'YYYY-MM-DD')" in check_sql
+    cols = prof["columns"]
+    # Same normal form an Oracle DATE / datetime gets on the other side:
+    assert cols["order_date"]["min"] == "2025-06-01 08:13:00"
+    assert cols["updated_ts"]["max"] == "2026-05-28 12:40:00"
+    assert cols["ship_day"]["min"] == "2025-06-02"
+    assert cols["order_id"]["max"] == 2.0
